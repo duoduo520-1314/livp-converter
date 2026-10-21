@@ -1,0 +1,47 @@
+name: Build
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install PyInstaller
+        run: pip install pyinstaller
+
+      - name: Syntax check
+        run: python -m py_compile livp_converter.py
+
+      - name: Build exe
+        run: pyinstaller --onefile --windowed --name LIVPConverter livp_converter.py
+
+      - name: Verify exe was produced
+        run: |
+          if (-not (Test-Path dist\LIVPConverter.exe)) {
+            Write-Error "exe not found"
+            exit 1
+          }
+          Get-Item dist\LIVPConverter.exe | Select-Object Name, Length
+
+      - name: Upload to Release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/LIVPConverter.exe
+
+      - name: Upload artifact (no tag)
+        if: ${{ !startsWith(github.ref, 'refs/tags/') }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: LIVPConverter
+          path: dist/LIVPConverter.exe

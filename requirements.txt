@@ -1,0 +1,5 @@
+# 运行本工具本身不需要第三方库（仅用标准库 zipfile + tkinter）。
+# 下面两个是打包 exe 和跑测试用的。
+
+# 打包
+pyinstaller>=6.0
