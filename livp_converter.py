@@ -623,7 +623,11 @@ class App(tk.Tk):
         # 未开始生成时整行隐藏：一条空的进度槽只是噪音。
         # 用 grid_remove 而非 pack_forget —— 外层是 grid 管理的。
         self._sheet_row = sh
-        sh.grid_remove()
+        # 未开始生成时整行隐藏：一条空的进度槽只是噪音。
+        # 显隐统一走 _show_sheet_row / _hide_sheet_row ——
+        # 这一行在 V1 里被 grid 管理、在 V2 里被 pack 管理，
+        # 写死任何一种都会让另一种静默失效。
+        self._hide_sheet_row()
 
         # 耗时预估
         self.var_est = tk.StringVar()
@@ -1085,12 +1089,19 @@ class App(tk.Tk):
         self.sheet_bar.config(maximum=total, value=0)
         self.var_sheet.set("准备中…")
         self.var_status.set("正在生成联系表…")
-        self._sheet_row.grid()
+        self._show_sheet_row()
         self.btn_sheet.config(state="disabled")
         self.btn_sheet_stop.config(state="normal")
 
         self.sheet_worker = SheetWorker(d, entries, FFMPEG, self.q)
         self.sheet_worker.start()
+
+    def _show_sheet_row(self):
+        """显示联系表进度行。子类若换了布局管理器需一并覆盖。"""
+        self._sheet_row.grid()
+
+    def _hide_sheet_row(self):
+        self._sheet_row.grid_remove()
 
     def stop_sheet(self):
         """中途放弃生成。已缓存的缩略图保留，下次接着用。"""
@@ -1214,111 +1225,119 @@ class App(tk.Tk):
             self.var_status.set("正在停止…")
 
     def _pump(self):
+        """排空队列并派发消息。
+
+        派发逻辑单独放在 _handle_msg 里，子类可以只重写个别消息的处理
+        （如 V2 要加进度文案与状态胶囊），而不必复制整个队列循环。
+        复制一遍意味着两处逻辑各自演化，迟早会不一致。
+        """
         try:
             while True:
-                kind = self.q.get_nowait()
-                if kind[0] == "total":
-                    self.bar.config(maximum=kind[1])
-                elif kind[0] == "sheet_total":
-                    _, _total, miss = kind
-                    self.sheet_bar.config(maximum=_total, value=0)
-                    self.var_sheet.set("0 / %d（需新建 %d 张）" % (_total, miss))
-                elif kind[0] == "sheet_progress":
-                    _, done, name = kind
-                    self.sheet_bar.config(value=done)
-                    self.var_sheet.set("%d / %d  %s"
-                                       % (done, self.sheet_bar["maximum"], name))
-                elif kind[0] == "sheet_done":
-                    self._sheet_finished(kind)
-                elif kind[0] == "item":
-                    self.var_status.set("(%d/%d) %s" % (kind[1], self.bar["maximum"],
-                                                         os.path.basename(kind[2])))
-                elif kind[0] == "progress":
-                    # 每完成一个就落盘，中途关闭程序也不丢进度
-                    if kind[1] not in self.state["done"]:
-                        self.state["done"].append(kind[1])
-                        self._persist()
-                elif kind[0] == "done":
-                    _, idx, src, made = kind
-                    self.bar.config(value=idx)
-                    # 「已存在，跳过」与真实转换成功要分开归类，
-                    # 否则点「成功」会混进几百条其实没转换的记录
-                    if made == "已存在，跳过":
-                        self.write_log("[%d] 跳过 %s  →  %s"
-                                       % (idx, os.path.basename(src), made), "skip")
-                    else:
-                        self.write_log("[%d] OK   %s  →  %s"
-                                       % (idx, os.path.basename(src), made), "ok")
-                elif kind[0] == "fail":
-                    _, idx, src, err = kind
-                    self.bar.config(value=idx)
-                    self.write_log("[%d] 失败 %s  →  %s"
-                                   % (idx, os.path.basename(src), err), "fail")
-                elif kind[0] == "cleanup_keep":
-                    kept = kind[1]
-                    self.write_log("有 %d 个文件的产物未确认落盘，"
-                                   "其源文件已保留：" % len(kept), "meta")
-                    for s in kept[:5]:
-                        self.write_log("· " + os.path.basename(s), "skip")
-                    if len(kept) > 5:
-                        self.write_log("  …另有 %d 个" % (len(kept) - 5), "meta")
-                elif kind[0] == "finish":
-                    _, ok, fail, skip, stopped = kind[:5]
-                    no_time = kind[5] if len(kind) > 5 else 0
-                    cleanup = kind[6] if len(kind) > 6 else (0, 0, [])
-                    self.write_log("-" * 58, "meta")
-                    parts = ["成功 %d" % ok, "失败 %d" % fail]
-                    if skip:
-                        parts.append("跳过 %d" % skip)
-                    if stopped:
-                        parts.append("已手动停止")
-                    self.write_log("完成：" + "，".join(parts), "meta")
-                    if no_time:
-                        self.write_log(
-                            "⚠ 有 %d 个文件未能读到拍摄时间（EXIF 与文件名都没有），"
-                            "已保留原文件名。" % no_time, "meta")
-                        self.write_log("  文件修改时间在传输/备份后往往失真，"
-                                       "因此未用它生成文件名。", "meta")
-
-                    cok, cfail, cerrs = cleanup
-                    if self.var_cleanup.get() or cok or cfail:
-                        if stopped:
-                            self.write_log("已手动停止，源文件全部保留，未执行清理。", "meta")
-                        elif fail:
-                            self.write_log("存在 %d 个失败文件，本次不清理任何源文件。"
-                                           % fail, "meta")
-                        elif cok:
-                            self.write_log("已将 %d 个源 .livp 移入回收站。"
-                                           % cok, "meta")
-                            self.write_log("  回收站仍占用磁盘空间，"
-                                           "需要时请手动清空回收站；清空后不可恢复。", "meta")
-                        if cfail:
-                            self.write_log("⚠ %d 个源文件未能删除，已保留：" % cfail, "meta")
-                            for e in cerrs[:5]:
-                                self.write_log("  · " + e, "meta")
-                            if len(cerrs) > 5:
-                                self.write_log("  …另有 %d 条" % (len(cerrs) - 5), "meta")
-
-                    self.var_status.set("已停止" if stopped else "全部完成")
-                    self.btn_start.config(state="normal")
-                    self.var_cleanup.set(False)   # 清理只对本次生效
-                    # 本次已完成的数量进入记录，预估随之下降
-                    self._refresh_estimate()
-                    # 汇总落定：让筛选按钮的计数与最终结果一致
-                    self._sync_filter_buttons()
-                    if (ok or skip) and not stopped:
-                        msg = "成功 %d 个" % ok
-                        if fail:
-                            msg += "，失败 %d 个" % fail
-                        if skip:
-                            msg += "，跳过 %d 个（已存在）" % skip
-                        if cok:
-                            msg += "\n\n另有 %d 个源文件已移入回收站（需手动清空回收站才会释放空间）" % cok
-                        messagebox.showinfo("转换完成", msg + "。\n\n输出位置：%s"
-                                            % self.var_out.get())
+                self._handle_msg(self.q.get_nowait())
         except queue.Empty:
             pass
         self.after(120, self._pump)
+
+    def _handle_msg(self, kind):
+        if kind[0] == "total":
+            self.bar.config(maximum=kind[1])
+        elif kind[0] == "sheet_total":
+            _, _total, miss = kind
+            self.sheet_bar.config(maximum=_total, value=0)
+            self.var_sheet.set("0 / %d（需新建 %d 张）" % (_total, miss))
+        elif kind[0] == "sheet_progress":
+            _, done, name = kind
+            self.sheet_bar.config(value=done)
+            self.var_sheet.set("%d / %d  %s"
+                               % (done, self.sheet_bar["maximum"], name))
+        elif kind[0] == "sheet_done":
+            self._sheet_finished(kind)
+        elif kind[0] == "item":
+            self.var_status.set("(%d/%d) %s" % (kind[1], self.bar["maximum"],
+                                                 os.path.basename(kind[2])))
+        elif kind[0] == "progress":
+            # 每完成一个就落盘，中途关闭程序也不丢进度
+            if kind[1] not in self.state["done"]:
+                self.state["done"].append(kind[1])
+                self._persist()
+        elif kind[0] == "done":
+            _, idx, src, made = kind
+            self.bar.config(value=idx)
+            # 「已存在，跳过」与真实转换成功要分开归类，
+            # 否则点「成功」会混进几百条其实没转换的记录
+            if made == "已存在，跳过":
+                self.write_log("[%d] 跳过 %s  →  %s"
+                               % (idx, os.path.basename(src), made), "skip")
+            else:
+                self.write_log("[%d] OK   %s  →  %s"
+                               % (idx, os.path.basename(src), made), "ok")
+        elif kind[0] == "fail":
+            _, idx, src, err = kind
+            self.bar.config(value=idx)
+            self.write_log("[%d] 失败 %s  →  %s"
+                           % (idx, os.path.basename(src), err), "fail")
+        elif kind[0] == "cleanup_keep":
+            kept = kind[1]
+            self.write_log("有 %d 个文件的产物未确认落盘，"
+                           "其源文件已保留：" % len(kept), "meta")
+            for s in kept[:5]:
+                self.write_log("· " + os.path.basename(s), "skip")
+            if len(kept) > 5:
+                self.write_log("  …另有 %d 个" % (len(kept) - 5), "meta")
+        elif kind[0] == "finish":
+            _, ok, fail, skip, stopped = kind[:5]
+            no_time = kind[5] if len(kind) > 5 else 0
+            cleanup = kind[6] if len(kind) > 6 else (0, 0, [])
+            self.write_log("-" * 58, "meta")
+            parts = ["成功 %d" % ok, "失败 %d" % fail]
+            if skip:
+                parts.append("跳过 %d" % skip)
+            if stopped:
+                parts.append("已手动停止")
+            self.write_log("完成：" + "，".join(parts), "meta")
+            if no_time:
+                self.write_log(
+                    "⚠ 有 %d 个文件未能读到拍摄时间（EXIF 与文件名都没有），"
+                    "已保留原文件名。" % no_time, "meta")
+                self.write_log("  文件修改时间在传输/备份后往往失真，"
+                               "因此未用它生成文件名。", "meta")
+
+            cok, cfail, cerrs = cleanup
+            if self.var_cleanup.get() or cok or cfail:
+                if stopped:
+                    self.write_log("已手动停止，源文件全部保留，未执行清理。", "meta")
+                elif fail:
+                    self.write_log("存在 %d 个失败文件，本次不清理任何源文件。"
+                                   % fail, "meta")
+                elif cok:
+                    self.write_log("已将 %d 个源 .livp 移入回收站。"
+                                   % cok, "meta")
+                    self.write_log("  回收站仍占用磁盘空间，"
+                                   "需要时请手动清空回收站；清空后不可恢复。", "meta")
+                if cfail:
+                    self.write_log("⚠ %d 个源文件未能删除，已保留：" % cfail, "meta")
+                    for e in cerrs[:5]:
+                        self.write_log("  · " + e, "meta")
+                    if len(cerrs) > 5:
+                        self.write_log("  …另有 %d 条" % (len(cerrs) - 5), "meta")
+
+            self.var_status.set("已停止" if stopped else "全部完成")
+            self.btn_start.config(state="normal")
+            self.var_cleanup.set(False)   # 清理只对本次生效
+            # 本次已完成的数量进入记录，预估随之下降
+            self._refresh_estimate()
+            # 汇总落定：让筛选按钮的计数与最终结果一致
+            self._sync_filter_buttons()
+            if (ok or skip) and not stopped:
+                msg = "成功 %d 个" % ok
+                if fail:
+                    msg += "，失败 %d 个" % fail
+                if skip:
+                    msg += "，跳过 %d 个（已存在）" % skip
+                if cok:
+                    msg += "\n\n另有 %d 个源文件已移入回收站（需手动清空回收站才会释放空间）" % cok
+                messagebox.showinfo("转换完成", msg + "。\n\n输出位置：%s"
+                                    % self.var_out.get())
 
     # ---------- 日志
     # 每类日志一个 tkinter tag：既决定颜色，也决定筛选时是否可见。
