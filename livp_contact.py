@@ -11,11 +11,15 @@
 import html
 import os
 import subprocess
+import sys
 
 import livp_meta
 
 
 THUMB_WIDTH = 320
+
+# 与主程序一致：避免生成缩略图时闪出命令行窗口
+NO_WINDOW = 0x08000000 if sys.platform == "win32" else 0
 
 
 def make_thumb(jpg_path, thumb_path, ffmpeg):
@@ -27,7 +31,8 @@ def make_thumb(jpg_path, thumb_path, ffmpeg):
            thumb_path]
     try:
         p = subprocess.run(cmd, stdout=subprocess.DEVNULL,
-                           stderr=subprocess.DEVNULL)
+                           stderr=subprocess.DEVNULL,
+                           creationflags=NO_WINDOW)
         return p.returncode == 0 and os.path.isfile(thumb_path) \
             and os.path.getsize(thumb_path) > 0
     except Exception:

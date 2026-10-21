@@ -52,6 +52,12 @@ def find_ffmpeg():
 
 FFMPEG = find_ffmpeg()
 
+# 打包为 --windowed 后主进程本身没有控制台，但启动子进程时 Windows 仍会
+# 默认新建一个控制台窗口，表现为转换过程中反复闪出黑色命令行窗口。
+# CREATE_NO_WINDOW 明确要求子进程不分配控制台，输出照常走管道捕获。
+# 仅 Windows 支持；其他平台传0 即可。
+NO_WINDOW = 0x08000000 if sys.platform == "win32" else 0
+
 
 # ---------------------------------------------------------------- 核心转换
 
@@ -84,7 +90,8 @@ class Converter:
 
     @staticmethod
     def run(cmd):
-        p = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        p = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                           creationflags=NO_WINDOW)
         return p.returncode, (p.stdout or b"").decode("utf-8", "ignore")
 
     @staticmethod
