@@ -24,7 +24,9 @@ Extract them and you get a standard JPG image plus a standard MP4 video — both
 
 ## Quick start
 
-1. Download `LIVPConverter.exe` from [Releases](https://github.com/duoduo520-1314/livp-converter/releases)
+1. Download an executable from [Releases](https://github.com/duoduo520-1314/livp-converter/releases) —
+   **`LIVPConverter_v2.exe` is the recommended one** (redesigned interface, see below).
+   `LIVPConverter.exe` is the previous interface, kept for anyone who prefers it.
 2. Run it — no installation required
 3. Three steps:
    - **Select files** (multiple selection supported) or **select a folder** (recursively finds every `.livp`)
@@ -45,6 +47,23 @@ Or download it from [ffmpeg.org/download.html](https://ffmpeg.org/download.html)
 
 Alternatively, place `ffmpeg.exe` in the same directory as this app. A successful setup is
 confirmed by the message `ffmpeg engine ready` in the log panel at startup.
+
+## v2 — what's new in the interface
+
+The v2 executable (`LIVPConverter_v2.exe`) keeps **every** feature listed below and
+rebuilds the interface around what actually goes wrong when converting a large batch:
+
+| Change | Why it matters |
+|---|---|
+| **The file list is visible** | Selecting a folder used to report only a count such as "893 files". v2 lists every album with its file count and size, so you can confirm what was found *before* starting |
+| **Options collapse, and stay collapsed** | Eight checkboxes and a quality slider no longer occupy the middle of the window. The collapsed state is remembered across launches |
+| **Status pill and percentage progress** | Shows `75%　3 / 4　IMG_0421.livp`, and the status colour changes between idle / busy / success / failure |
+| **Primary and secondary actions separated** | "Start conversion" is the only emphasised button. "Clear record" moves to the right and is outlined, so a destructive click is never next to the one used every time |
+| **Window height fits the content** | At a fixed height the log area could be squeezed to 2 px — effectively no log. v2 sizes the window to its content and keeps it fully on screen |
+| **Visible input borders** | The output-folder field was previously indistinguishable from a label |
+
+Both versions share the same conversion code: v2 subclasses the v1 application, so there
+is only ever one implementation of the logic that touches your files.
 
 ## Features
 
@@ -302,7 +321,9 @@ introduced, so the executable size is unaffected.
 
 | File | Responsibility |
 |---|---|
-| `livp_converter.py` | Main application: conversion logic, background worker, GUI |
+| `livp_converter.py` | v1 entry point: conversion logic, background worker, GUI |
+| `livp_converter_v2.py` | v2 entry point — same conversion logic, redesigned interface |
+| `livp_ui.py` | v2 interface layer. Subclasses the v1 app so all conversion logic is shared, never duplicated |
 | `livp_meta.py` | Capture-time resolution: EXIF → file name, with no unsafe guessing |
 | `livp_state.py` | Job state persistence backing resumable jobs (atomic writes, versioned so stale option defaults are not restored) |
 | `livp_contact.py` | Contact-sheet generation: thumbnail cache and HTML gallery, with paged and continuous-scroll rendering over a shared slice renderer |
@@ -311,6 +332,11 @@ introduced, so the executable size is unaffected.
 | `livp_estimate.py` | Time and size estimation from measured per-file costs; kept separate so the figures are testable |
 
 ## FAQ
+
+**Q: Should I download v1 or v2?**
+v2. It has the same conversion engine with a redesigned interface. v1 remains in each
+release so you can fall back if you prefer the old layout — but bug fixes land in the
+shared code, so both benefit.
 
 **Q: "ffmpeg not found" on startup?**
 Install ffmpeg as described above, or place `ffmpeg.exe` next to the application.

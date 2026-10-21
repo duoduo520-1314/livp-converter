@@ -20,24 +20,33 @@ jobs:
         run: pip install pyinstaller
 
       - name: Syntax check
-        run: python -m py_compile livp_converter.py
+        run: python -m py_compile livp_converter.py livp_converter_v2.py
 
-      - name: Build exe
+      # V1 与 V2 共用全部转换逻辑，差异只在界面层，两个入口都构建：
+      # V2 是推荐版本，V1 保留供需要旧界面的用户回退。
+      - name: Build exe (v1)
         run: pyinstaller --onefile --windowed --name LIVPConverter livp_converter.py
 
-      - name: Verify exe was produced
-        run: |
-          if (-not (Test-Path dist\LIVPConverter.exe)) {
-            Write-Error "exe not found"
-            exit 1
-          }
-          Get-Item dist\LIVPConverter.exe | Select-Object Name, Length
+      - name: Build exe (v2)
+        run: pyinstaller --onefile --windowed --name LIVPConverter_v2 livp_converter_v2.py
 
-      - name: Upload exe as artifact
+      - name: Verify exes were produced
+        run: |
+          foreach ($f in @('dist\LIVPConverter.exe', 'dist\LIVPConverter_v2.exe')) {
+            if (-not (Test-Path $f)) {
+              Write-Error "$f not found"
+              exit 1
+            }
+            Get-Item $f | Select-Object Name, Length
+          }
+
+      - name: Upload exes as artifact
         uses: actions/upload-artifact@v4
         with:
           name: LIVPConverter
-          path: dist/LIVPConverter.exe
+          path: |
+            dist/LIVPConverter.exe
+            dist/LIVPConverter_v2.exe
 
       # 需要仓库 Settings → Actions → Workflow permissions 设为
       # "Read and write permissions" 才能自动创建 Release。
@@ -46,6 +55,8 @@ jobs:
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
-          files: dist/LIVPConverter.exe
+          files: |
+            dist/LIVPConverter.exe
+            dist/LIVPConverter_v2.exe
           fail_on_unmatched_files: false
         continue-on-error: true
