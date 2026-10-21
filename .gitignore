@@ -3,6 +3,11 @@ dist/
 build/
 *.spec
 
+# 验证脚本的中间产物
+_js_extract.js
+_js_data.json
+_test_out.txt
+
 # 本机任务记录（断点续传状态，含用户本地路径）
 .livp_state.json
 
@@ -21,3 +26,6 @@ venv/
 # 系统
 .DS_Store
 Thumbs.db
+# 打包日志
+_build.log
+_verify_exe.py

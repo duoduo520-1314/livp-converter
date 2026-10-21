@@ -53,7 +53,7 @@ confirmed by the message `ffmpeg engine ready` in the log panel at startup.
 | **Select files** | Single or multiple selection via Ctrl / Shift |
 | **Select a folder** | Recursive scan that preserves the original subfolder structure |
 | **Resumable jobs** | Close the app mid-run and reopen it — the file list, output folder, and options are restored so you can continue where you left off |
-| **Contact sheet** | Generates a browsable HTML gallery of everything you converted, grouped by album |
+| **Contact sheet** | Generates a browsable HTML gallery of everything you converted, grouped by album, with paged or continuous-scroll browsing |
 | **Timestamp-based naming** | Output files are named `20260315_102333.jpg` using the actual capture time instead of `IMG_1234` |
 | **Date-based subfolders** | Optional second-level `2026-03-15/` folders inside each album directory |
 | **Skip already converted** | Enabled by default. Files whose output already exists are not reprocessed |
@@ -104,6 +104,37 @@ lightbox (arrow keys to browse). It opens in your default browser and works offl
 Thumbnails are generated with ffmpeg and cached in a `.thumbs` folder, so regenerating the
 sheet for an updated batch only processes newly converted photos. For 893 photos the first
 run takes roughly 3 minutes and the resulting page is under 1 MB.
+
+### Two browsing modes
+
+Neither mode ever puts every photo into the DOM at once, which is what makes a sheet of
+893 photos (or 10,000) stay responsive.
+
+| Mode | Behaviour | Best for |
+|---|---|---|
+| **Paged** (default) | Renders a fixed number of photos per page — 60, 120, 240 or 480. A pager sits at the bottom with first / previous / next / last and a jump-to-page box. | Picking through a batch page by page |
+| **Continuous scroll** | Appends the next batch automatically as you reach the bottom. | Skimming the whole set in one pass |
+
+Photos are **counted, not nodes**: album headers never consume a slot, so "120 per page"
+always means exactly 120 photos. If a page happens to begin in the middle of an album, its
+header is repeated so you never lose track of where you are.
+
+### Filtering
+
+- **Search** matches against the file name, as you type.
+- **Album** narrows the sheet to a single album.
+
+Both filters apply in **either** mode, and the lightbox navigates only the photos that
+matched — arrow keys will never jump to a photo you filtered out.
+
+### Lightbox
+
+Click any thumbnail to enlarge it. Arrow keys move through the current result set, `Esc`
+closes. Photos that have a matching MP4 open in a video player with playback controls
+instead of a still image.
+
+> All links in the sheet are **relative**, so the output folder can be moved, renamed or
+> shared as-is — the page keeps working as long as it stays next to the photos.
 
 ## Cleaning up source files (use with care)
 
@@ -207,7 +238,7 @@ introduced, so the executable size is unaffected.
 | `livp_converter.py` | Main application: conversion logic, background worker, GUI |
 | `livp_meta.py` | Capture-time resolution: EXIF → file name, with no unsafe guessing |
 | `livp_state.py` | Job state persistence backing resumable jobs (atomic writes, versioned so stale option defaults are not restored) |
-| `livp_contact.py` | Contact-sheet generation: thumbnail cache and HTML gallery |
+| `livp_contact.py` | Contact-sheet generation: thumbnail cache and HTML gallery, with paged and continuous-scroll rendering over a shared slice renderer |
 | `livp_cleanup.py` | Optional source-file cleanup via the Windows Recycle Bin (ctypes `SHFileOperationW`, no permanent delete) |
 | `make_test_livp.py` | Development helper that generates test `.livp` files; not part of the build |
 
