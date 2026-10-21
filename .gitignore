@@ -32,3 +32,9 @@ _verify_exe.py
 _verify_estimate.py
 _verify_logfilter.py
 _verify_sheet.py
+_audit_bugs.py
+_audit_impact.py
+_verify_fixes.py
+_regress_v1.py
+_diag.py
+_diag2.py

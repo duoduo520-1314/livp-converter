@@ -74,7 +74,11 @@ def _iter_exif_times(tiff):
                     sub = struct.unpack(en + "I", tiff[p + 8:p + 12])[0]
                 except struct.error:
                     sub = 0
-                walk(sub, depth + 1)
+                # 必须 yield from：walk 是生成器，裸调用只会造一个没人读的
+                # 生成器对象然后丢弃，Exif 子 IFD 里的 DateTimeOriginal
+                # （0x9003，相机几乎都只写在这里）就永远读不到，
+                # 「EXIF 优先」实际退化成了只认 IFD0 的 DateTime。
+                yield from walk(sub, depth + 1)
                 continue
 
             if tag in (TAG_DATETIME_ORIGINAL, TAG_DATETIME_DIGITIZED, TAG_DATETIME):

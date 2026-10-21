@@ -43,7 +43,10 @@ def find_ffmpeg():
     """定位 ffmpeg：优先 exe 同级目录，其次系统 PATH。"""
     base = os.path.dirname(os.path.abspath(sys.executable if getattr(sys, "frozen", False)
                                                     else __file__))
-    for folder in (base, os.path.join(base, "ffmpeg"), base):
+    # 顺序：exe 同级目录 → 同级 ffmpeg\ 子目录 → 上级目录 → 系统 PATH。
+    # 原实现把 base 写了两遍，等于漏掉了「上级目录」这一候选。
+    for folder in (base, os.path.join(base, "ffmpeg"),
+                   os.path.dirname(base)):
         cand = os.path.join(folder, "ffmpeg.exe")
         if os.path.isfile(cand):
             return cand
@@ -54,6 +57,25 @@ def find_ffmpeg():
 
 
 FFMPEG = find_ffmpeg()
+
+
+def _kill(p):
+    """终止子进程：先温和后强制。Windows 上 terminate 即可，
+    但若 ffmpeg 卡在 IO 上可能不响应，故留 2 秒强杀兜底。"""
+    try:
+        p.terminate()
+        p.wait(timeout=2)
+    except Exception:
+        try:
+            p.kill()
+        except Exception:
+            pass
+    # 回收管道，避免僵尸句柄堆积（893 个文件循环时会积累）
+    try:
+        if p.stdout:
+            p.stdout.close()
+    except Exception:
+        pass
 
 # 打包为 --windowed 后主进程本身没有控制台，但启动子进程时 Windows 仍会
 # 默认新建一个控制台窗口，表现为转换过程中反复闪出黑色命令行窗口。
@@ -91,14 +113,39 @@ class Converter:
                     vid = os.path.join(root, fn)
         return img, vid
 
-    @staticmethod
-    def run(cmd):
-        p = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                           creationflags=NO_WINDOW)
-        return p.returncode, (p.stdout or b"").decode("utf-8", "ignore")
+    # 单个 ffmpeg 调用的最长等待时间（秒）。
+    # 实测正常文件 1-3 秒；损坏文件可能让 ffmpeg 无限期挂住，
+    # 没有超时就会卡死整个批次，「停止」按钮也形同虚设。
+    TIMEOUT = 120
 
     @staticmethod
-    def to_jpg(img_path, out_path, quality=2):
+    def run(cmd, stop_flag=None, timeout=None):
+        """执行 ffmpeg，返回 (returncode, 输出文本)。
+
+        与 subprocess.run 的区别：改用 Popen 轮询，因此
+        · 支持 stop_flag ——「停止」能在单个文件执行中途生效，
+          而不必等这个文件跑完（原实现只能等文件之间才检查）
+        · 支持 timeout —— 损坏文件不会把整个批次拖死
+        """
+        p = subprocess.Popen(cmd, stdout=subprocess.PIPE,
+                             stderr=subprocess.STDOUT, creationflags=NO_WINDOW)
+        if timeout is None:
+            timeout = Converter.TIMEOUT
+        deadline = time.time() + timeout
+        while p.poll() is None:
+            if stop_flag is not None and stop_flag.is_set():
+                _kill(p)
+                raise RuntimeError("已取消")
+            if time.time() > deadline:
+                _kill(p)
+                raise RuntimeError("ffmpeg 执行超时（%d 秒），已终止：%s"
+                                   % (timeout, os.path.basename(cmd[0])))
+            time.sleep(0.05)
+        out = p.stdout.read() if p.stdout else b""
+        return p.returncode, (out or b"").decode("utf-8", "ignore")
+
+    @staticmethod
+    def to_jpg(img_path, out_path, quality=2, stop_flag=None):
         """HEIC/JPEG 主图 -> JPG。
 
         关键点：不能加 -map 0:v:0。HEIC 内部第一个流常是 512x512 缩略图，
@@ -110,12 +157,12 @@ class Converter:
                "-q:v", str(quality),
                "-update", "1",
                out_path]
-        rc, log = Converter.run(cmd)
+        rc, log = Converter.run(cmd, stop_flag)
         if rc != 0 or not os.path.isfile(out_path) or os.path.getsize(out_path) == 0:
             raise RuntimeError("图片转换失败: " + log.strip()[:400])
 
     @staticmethod
-    def to_mp4(mov_path, out_path, crf=20):
+    def to_mp4(mov_path, out_path, crf=20, stop_flag=None):
         """MOV(HEVC) -> MP4(H.264)，兼容性最好，任何设备都能播。"""
         cmd = [FFMPEG, "-y", "-hide_banner", "-loglevel", "error",
                "-i", mov_path,
@@ -124,12 +171,12 @@ class Converter:
                "-movflags", "+faststart",
                "-c:a", "aac", "-b:a", "128k",
                out_path]
-        rc, log = Converter.run(cmd)
+        rc, log = Converter.run(cmd, stop_flag)
         if rc != 0 or not os.path.isfile(out_path) or os.path.getsize(out_path) == 0:
             raise RuntimeError("视频转换失败: " + log.strip()[:400])
 
     @staticmethod
-    def to_gif(mov_path, out_path, fps=12, width=480):
+    def to_gif(mov_path, out_path, fps=12, width=480, stop_flag=None):
         """MOV -> GIF，方便直接发微信/社交平台。
 
         注意：GIF 体积大、生成慢（约 2.8s/个，且单文件常达数 MB），
@@ -139,7 +186,7 @@ class Converter:
               % (fps, width))
         cmd = [FFMPEG, "-y", "-hide_banner", "-loglevel", "error",
                "-i", mov_path, "-vf", vf, "-loop", "0", out_path]
-        rc, log = Converter.run(cmd)
+        rc, log = Converter.run(cmd, stop_flag)
         if rc != 0 or not os.path.isfile(out_path) or os.path.getsize(out_path) == 0:
             raise RuntimeError("GIF 生成失败: " + log.strip()[:400])
 
@@ -221,6 +268,7 @@ class Worker(threading.Thread):
                 base_jpg = os.path.join(dst_dir, stem + ".jpg")
                 base_mp4 = os.path.join(dst_dir, stem + ".mp4")
                 base_gif = os.path.join(dst_dir, stem + ".gif")
+                base_mov = os.path.join(dst_dir, stem + ".mov")
 
                 # 「跳过已转换」：主产物都存在、且不是本次运行刚产出的同名文件时才跳过。
                 # 后半条很关键——同一秒连拍的多张标准名相同，若只判文件存在会漏转换。
@@ -232,14 +280,40 @@ class Worker(threading.Thread):
                     if self.opts.get("gif", False):
                         have = have and os.path.isfile(base_gif) \
                             and os.path.getsize(base_gif) > 0
+                    # 「保留原始文件」必须参与判定。原先漏了它，
+                    # 结果是：先跑一遍不勾保留，再勾上重跑 —— 因JPG/MP4
+                    # 已存在被整批跳过，原图永远补不出来，用户以为功能坏了。
+                    if have and self.opts.get("keep_mov", False):
+                        have = os.path.isfile(base_mov) \
+                            and os.path.getsize(base_mov) > 0
+                    if have and self.opts.get("keep_heic", False):
+                        # 原图后缀随源容器而定（.heic/.heif/.jpg），
+                        # 任一存在即视为已保留
+                        have = any(
+                            os.path.isfile(os.path.join(dst_dir, stem + ext))
+                            and os.path.getsize(
+                                os.path.join(dst_dir, stem + ext)) > 0
+                            for ext in (".heic", ".heif", ".jpg", ".jpeg"))
                     if have:
                         skip += 1
                         self.q.put(("progress", src))
                         self.q.put(("done", idx, src, "已存在，跳过"))
                         continue
 
-                # 确需产出时才占用名字：同一秒连拍得到 _2 / _3，互不覆盖
-                jpg = self._unique(base_jpg)
+                # 确需产出时才占用名字：同一秒连拍得到 _2 / _3，互不覆盖。
+                #
+                # 但「skip 未命中、且标准名的 JPG 已存在」是一个特殊情形：
+                # 说明这个文件本来就是上一轮留下的，本次只是来【补齐】缺失的
+                # 产物（如第一次没勾保留原图，第二次勾了）。此时必须写回
+                # 标准名 —— 若交给 _unique 改名，产物会落到 _2，而 skip 判定
+                # 查的始终是标准名，于是每跑一次多一份 _2/_3 副本，永远收敛不了。
+                if (self.opts.get("skip_existing")
+                        and base_jpg not in self.used
+                        and os.path.isfile(base_jpg)):
+                    jpg = base_jpg
+                    self.used.add(jpg)
+                else:
+                    jpg = self._unique(base_jpg)
                 mp4 = os.path.join(dst_dir, os.path.splitext(jpg)[0] + ".mp4")
                 gif = os.path.join(dst_dir, os.path.splitext(jpg)[0] + ".gif")
 
@@ -264,15 +338,18 @@ class Worker(threading.Thread):
                             shutil.copy2(img, keep)
                         done.append("原图")
 
-                    Converter.to_jpg(img, jpg, self.opts.get("quality", 2))
+                    Converter.to_jpg(img, jpg, self.opts.get("quality", 2),
+                                     self.stop_flag)
                     done.append("JPG")
 
                     if vid:
                         if self.opts.get("mp4", True):
-                            Converter.to_mp4(vid, mp4, self.opts.get("crf", 20))
+                            Converter.to_mp4(vid, mp4, self.opts.get("crf", 20),
+                                             self.stop_flag)
                             done.append("MP4")
                         if self.opts.get("gif", False):
-                            Converter.to_gif(vid, gif, self.opts.get("gif_fps", 12))
+                            Converter.to_gif(vid, gif, self.opts.get("gif_fps", 12),
+                                             stop_flag=self.stop_flag)
                             done.append("GIF")
                         if self.opts.get("keep_mov", False):
                             keep = os.path.join(dst_dir, os.path.splitext(jpg)[0] + ".mov")
@@ -281,6 +358,12 @@ class Worker(threading.Thread):
                             done.append("MOV")
                     if self.stop_flag.is_set():
                         break
+                except RuntimeError as e:
+                    # 「已取消」来自 stop_flag，不是转换失败。
+                    # 计入失败会让日志报假错，也会阻断清理流程。
+                    if "已取消" in str(e):
+                        break
+                    raise
                 finally:
                     shutil.rmtree(work, ignore_errors=True)
 
@@ -288,8 +371,14 @@ class Worker(threading.Thread):
                 # 登记产物供清理阶段校验：只有确认落盘才允许删源文件。
                 # 注意「已存在跳过」的分支走continue，不登记到 produced——
                 # 续传时被跳过的旧文件同样安全，不会因本轮开启清理而被误删。
-                self.produced.append((src, [jpg] + ([mp4] if vid and
-                                                    self.opts.get("mp4", True) else [])))
+                # GIF 同样要登记：勾了 GIF 就意味着用户要它，
+                # GIF 缺失却删了源，等于永远补不回来。
+                outs = [jpg]
+                if vid and self.opts.get("mp4", True):
+                    outs.append(mp4)
+                if vid and self.opts.get("gif", False):
+                    outs.append(gif)
+                self.produced.append((src, outs))
                 label = " + ".join(done)
                 if t is None:
                     label += "  [无拍摄时间，沿用原名]"
@@ -840,30 +929,50 @@ class App(tk.Tk):
                      bordercolor="#e5e7eb", lightcolor=self.ACCENT, darkcolor=self.ACCENT)
 
     # ---------- 文件选择
+    @staticmethod
+    def _common_dir(paths):
+        """求一组路径所在的最深公共目录，跨盘时安全退化。
+
+        os.path.commonpath 在 C:\\ 与 D:\\ 混合时会抛 ValueError，
+        而它是在按钮回调里被调用的 —— 抛出去就是界面直接崩掉。
+        这里改为逐级回退比较，各盘符不同时返回 None 由调用方兜底。
+        """
+        dirs = [os.path.dirname(os.path.abspath(p)) for p in paths]
+        if not dirs:
+            return None
+        try:
+            return os.path.commonpath(dirs)
+        except ValueError:
+            return None
+
     def pick_files(self):
         paths = filedialog.askopenfilenames(
             title="选择 LIVP 文件（可多选）",
             filetypes=[("LIVP 实况照片", "*.livp"), ("所有文件", "*.*")])
         if not paths:
             return
-        if len(paths) > 1:
-            base = os.path.commonpath([os.path.dirname(p) for p in paths])
-        else:
-            base = os.path.dirname(paths[0])
+        # 注意 commonpath 要传「目录」而不是文件路径：
+        # 传文件路径时，单选一个文件会返回该文件的完整路径本身，
+        # 拼出的默认输出目录就成了「xxx.livp\转换结果」——
+        # 在一个文件当目录用，创建必然失败。
+        base = self._common_dir(paths)
         known = {p for p, _ in self.files}
         for p in paths:
             if p in known:
                 continue
             rel = ""
-            if self.var_preserve.get():
+            if self.var_preserve.get() and base:
                 d = os.path.dirname(p)
                 rel = "" if os.path.normcase(d) == os.path.normcase(base) \
                     else os.path.relpath(d, base)
             self.files.append((p, rel))
             known.add(p)
-        self.var_src.set("%d 个文件（来自 %s）" % (len(paths), base))
+        self.var_src.set("%d 个文件（来自 %s）"
+                         % (len(paths), base or "多个位置"))
         if not self.var_out.get():
-            self.var_out.set(os.path.join(os.path.commonpath(list(paths)), "转换结果"))
+            # 默认输出放在第一个文件所在目录的同级，而非文件内部
+            if base:
+                self.var_out.set(os.path.join(base, "转换结果"))
         self._refresh()
 
     def pick_folder(self):

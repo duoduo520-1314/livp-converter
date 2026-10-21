@@ -13,6 +13,7 @@
 两种模式下 DOM 都不会同时存在全部照片，避免 893 张时页面卡死。
 """
 
+import hashlib
 import json
 import os
 import subprocess
@@ -354,10 +355,20 @@ applyFilter();
 
 
 def thumb_path_for(jpg, out_root, thumb_dir):
-    """缩略图在缓存目录里的路径。命名规则与 build 保持一致。"""
-    p = os.path.join(thumb_dir,
-                     os.path.relpath(jpg, out_root).replace(os.sep, "__"))
-    return os.path.splitext(p)[0] + ".jpg"
+    """缩略图在缓存目录里的路径。命名规则与 build 保持一致。
+
+    原实现把路径分隔符直接替换成 "__"，这不是单射：
+    「c/a__b.jpg」与「c__a/b.jpg」都会得到 c__a__b.jpg，
+    两张不同的照片共用一个缩略图缓存，后写的会覆盖先写的。
+    这里改用「整段路径的哈希 + 原文件名」，长度固定且不会撞名。
+    """
+    rel = os.path.relpath(jpg, out_root)
+    digest = hashlib.md5(rel.encode("utf-8")).hexdigest()[:16]
+    base = os.path.splitext(os.path.basename(jpg))[0]
+    # 文件名可能很长（含非法字符已由上层处理），截断到可读长度
+    if len(base) > 40:
+        base = base[:40]
+    return os.path.join(thumb_dir, "%s_%s.jpg" % (base, digest))
 
 
 def count_missing(albums, out_root, thumb_dir=None):
@@ -412,14 +423,19 @@ def build(out_root, entries, ffmpeg, thumb_dir=None, progress=None,
             tpath = thumb_path_for(jpg, out_root, thumb_dir)
             if not os.path.isfile(tpath):
                 if not make_thumb(jpg, tpath, ffmpeg):
-                    tpath = rel# 生成失败则退回原图
+                    # 生成失败则退回原图。
+                    # 必须用 rel 拼回绝对路径再 relpath：直接拿 rel
+                    # （相对 out_root）去和 out_root 求相对，relpath 会
+                    # 以「当前工作目录」为基准解析它，产出 ../xxx 这种
+                    # 指向 out_root 之外的错误路径，图片必然裂开。
+                    tpath = os.path.join(out_root, rel)
             else:
                 cached += 1
             # 一律用相对路径：index.html 与照片同在 out_root 下，
             # 这样整个输出目录可以随意搬移或分享，链接不会失效
             items.append({
                 "f": rel.replace(os.sep, "/"),
-                "t": os.path.relpath(tpath, out_root).replace(os.sep, "/"),
+                "t": os.path.relpath(os.path.abspath(tpath), out_root).replace(os.sep, "/"),
                 "n": os.path.splitext(os.path.basename(jpg))[0],
                 "a": album,
                 "low": os.path.splitext(os.path.basename(jpg))[0].lower(),
