@@ -1,164 +1,188 @@
 # LIVP Converter
 
-把手机拍的**动态照片 / 实况照片**（`.livp`）批量拆分成普通图片和视频。
+Batch-extract still images and videos from **Live Photos** (`.livp`) captured on a smartphone.
 
-Windows 11 双击即用，图形界面，无需命令行。
+A native Windows desktop app with a graphical interface — double-click to run, no command line required.
+
+[简体中文](README.zh-CN.md)
 
 ---
 
-## 这是什么问题
+## The problem
 
-用手机拍了「动态照片」，传到电脑 / 发给朋友后，文件后缀变成了 `.livp`。
-这类图片**双击打不开**，微信、QQ、邮件、朋友圈也发不了 —— 因为它不是一种通用格式。
+When a Live Photo is transferred to a computer or shared with a friend, the file extension often becomes `.livp`. Such files **cannot be opened by double-clicking**, and cannot be sent through WeChat, QQ, email, or social platforms — because `.livp` is not a widely supported format.
 
-`.livp` 实际上是一个 **ZIP 压缩包**，里面装着两个东西：
+Under the hood, a `.livp` file is simply a **ZIP archive** containing two items:
 
 ```
 xxx.livp
-├── xxx.HEIC   ← 静态照片（主图）
-└── xxx.MOV    ← 按下快门前后的那段短视频（约 3 秒，带声音）
+├── xxx.HEIC   ← the still image
+└── xxx.MOV    ← the short clip recorded around the shutter press (~3 seconds, with audio)
 ```
 
-把它拆开，就得到一张普通 JPG 和一段普通 MP4，任何设备都能用。
+Extract them and you get a standard JPG image plus a standard MP4 video — both of which work on any device.
 
-## 直接使用（推荐）
+## Quick start
 
-1. 到 [Releases](https://github.com/duoduo520-1314/livp-converter/releases) 下载 `LIVPConverter.exe`
-2. 双击运行，无需安装
-3. 三步搞定：
-   - **选择文件**（可多选）或 **选择文件夹**（自动递归查找所有 `.livp`）
-   - **选择输出文件夹**
-   - 点 **开始转换**
+1. Download `LIVPConverter.exe` from [Releases](https://github.com/duoduo520-1314/livp-converter/releases)
+2. Run it — no installation required
+3. Three steps:
+   - **Select files** (multiple selection supported) or **select a folder** (recursively finds every `.livp`)
+   - **Choose an output folder**
+   - Click **Start Conversion**
 
-> Windows 首次运行会提示「未知发布者」，点「更多信息 → 仍要运行」即可。
+> On first launch, Windows may display an "Unknown publisher" warning. Click *More info → Run anyway*.
 
-### 需要先装 ffmpeg
+### ffmpeg is required
 
-本工具用 ffmpeg 做图片和视频转换，**请确保电脑已安装**：
+This tool uses ffmpeg for image and video transcoding, so **ffmpeg must be installed**:
 
 ```powershell
 winget install Gyan.FFmpeg
 ```
 
-或从 [ffmpeg.org/download.html](https://ffmpeg.org/download.html) 下载。
+Or download it from [ffmpeg.org/download.html](https://ffmpeg.org/download.html).
 
-也可以直接把 `ffmpeg.exe` 放在本程序同一目录下。启动后日志区会显示「ffmpeg 引擎就绪」即表示成功。
+Alternatively, place `ffmpeg.exe` in the same directory as this app. A successful setup is
+confirmed by the message `ffmpeg engine ready` in the log panel at startup.
 
-## 功能
+## Features
 
-| | |
+| Feature | Description |
 |---|---|
-| **选择单个 / 多个文件** | 支持按住 Ctrl / Shift 多选 |
-| **选择整个文件夹** | 递归查找，自动保留原有子目录结构 |
-| **断点续传** | 关掉程序再打开，自动恢复上次的文件列表与选项，接着没做完的继续 |
-| **按拍摄时间命名** | 产物名改为 `20260315_102333.jpg`，按 EXIF 拍摄时间而非 `IMG_1234` |
-| **按日期分文件夹** | 自动分到 `2026-03-15/` 子目录，跨天拍摄也不会混在一起 |
-| **跳过已转换** | 默认开启。输出已存在时不重复处理，中断后重跑不浪费时间 |
-| **输出 JPG** | 取全尺寸主图，不是缩略图 |
-| **输出 MP4** | 统一转 H.264，任何设备都能播放 |
-| **输出 GIF** | 可选，勾选时会提示体积代价 |
-| **保留原始文件** | 可选，同时保留 HEIC / MOV |
-| **画质调节** | 1（最高画质）~ 8（最小体积） |
-| **实时进度与日志** | 每个文件的转换结果一目了然 |
-| **中途停止** | 随时可以停下来 |
+| **Select files** | Single or multiple selection via Ctrl / Shift |
+| **Select a folder** | Recursive scan that preserves the original subfolder structure |
+| **Resumable jobs** | Close the app mid-run and reopen it — the file list, output folder, and options are restored so you can continue where you left off |
+| **Timestamp-based naming** | Output files are named `20260315_102333.jpg` using the actual capture time instead of `IMG_1234` |
+| **Date-based subfolders** | Optionally organised into `2026-03-15/` subfolders, keeping multi-day shoots separate |
+| **Skip already converted** | Enabled by default. Files whose output already exists are not reprocessed |
+| **JPG output** | Extracts the full-resolution still, not the embedded thumbnail |
+| **MP4 output** | Transcoded to H.264 for maximum device compatibility |
+| **GIF output** | Optional; a size warning is shown when enabled |
+| **Keep originals** | Optionally preserves the source HEIC / MOV files |
+| **Quality control** | Adjustable from 1 (highest quality) to 8 (smallest size) |
+| **Live progress and logs** | Per-file results reported in real time |
+| **Cancellable** | Stop a running job at any time |
 
-> **关于拍摄时间**：按以下优先级判定，转换日志里会标注每个文件时间的来源。
-> 1. 照片 **EXIF** 中的 `DateTimeOriginal`（最准确）
-> 2. **文件名**推断，如 `IMG_20260315_102333`
-> 3. **文件修改时间**（兜底，微信/QQ 传输后可能失真）
+> **On capture time**: the timestamp is resolved in the following order of precedence, and
+> the log labels each file with the source that was actually used.
+> 1. **`DateTimeOriginal`** from the image EXIF metadata — the most accurate source
+> 2. Inferred from the **file name**, e.g. `IMG_20260315_102333`
+> 3. The **file modification time** — a last resort, and unreliable after transfer
+>    through messaging apps
 >
-> HEIC 的 EXIF 存放在容器内部，本工具不做解析，会自动落到第 2、3 级 ——
-> 而绝大多数手机文件名本身就带时间戳，结果一致。日志中的 `[文件名]` `[修改时间]` 标签
-> 会如实告诉你该文件用了哪一级。
+> EXIF inside HEIC files is stored within the container and is not parsed by this tool,
+> so those files fall back to steps 2 and 3. Since most smartphone cameras already embed
+> a timestamp in the file name, the result is identical in practice. The `[EXIF]`,
+> `[file name]`, and `[mtime]` labels in the log tell you exactly which source was used.
 >
-> 同一秒内的连拍会自动追加 `_2` `_3` 序号，不会互相覆盖。
+> Multiple photos taken within the same second are automatically suffixed with `_2`, `_3`,
+> and so on, so nothing is ever overwritten.
 
-> **关于 GIF**：动图生成慢（约 2.8 秒/个）且体积大（约 6 MB/个）。
-> 勾选时会弹窗提示预计占用空间，可随时取消。
+> **On GIF**: GIF encoding is slow (~2.8 s per file) and produces large files (~6 MB each).
+> A dialog reports the estimated total size when this option is enabled.
 
-## 断点续传怎么用
+## Resuming an interrupted job
 
-1. 正常添加文件、选好输出目录，点「开始转换」
-2. 转换途中可以直接关掉程序，或点「停止」
-3. 下次打开，顶部会出现蓝色提示条，告诉你上次共几个、已完成几个、还剩几个
-4. 直接点「开始转换」，已完成的会自动跳过，只跑剩下的
+1. Add your files, choose an output folder, and click **Start Conversion**
+2. You may close the app or click **Stop** at any point during the run
+3. On the next launch, a banner appears at the top of the window summarising how many
+   files were in the previous job, how many completed, and how many remain
+4. Click **Start Conversion** again — completed files are skipped automatically and only
+   the remaining ones are processed
 
-任务记录保存在程序目录下的 `.livp_state.json`（目录不可写时退回 `%LOCALAPPDATA%\LIVPConverter\`）。
-点提示条上的「清除记录」或操作区的「清除记录」可删除，**不会影响任何已转换的文件**。
+The job record is stored in `.livp_state.json` next to the executable (falling back to
+`%LOCALAPPDATA%\LIVPConverter\` if that directory is not writable). Use the **Clear record**
+button to delete it — this never affects any already-converted files.
 
-> 换了源文件或输出目录后重新添加即可覆盖旧记录。若想从零开始，点一次「清除记录」。
+> Adding a different set of source files or a different output folder simply overwrites the
+> previous record. Use **Clear record** to start from scratch.
 
-## 支持的文件结构
+## Supported internal structures
 
-已实测覆盖以下两种（华为、小米、荣耀等安卓机的动态照片常见）：
+Both of the following layouts have been verified against real devices (common on Android
+phones from Huawei, Xiaomi, HONOR, and others):
 
-- `图片.heic` + `视频.mov`
-- `图片.jpeg` + `视频.mov`
+- `image.heic` + `video.mov`
+- `image.jpeg` + `video.mov`
 
-程序会自动识别内部文件名，不挑扩展名。
+Internal file names are detected automatically; the extension is not assumed.
 
 ---
 
-## 自行构建
+## Building from source
 
-需要 Python 3.8+：
+Requires Python 3.8+:
 
 ```bash
 pip install -r requirements.txt
 python livp_converter.py
 ```
 
-打包成单文件 exe：
+To build a single-file executable:
 
 ```bash
 pyinstaller --onefile --windowed --name LIVPConverter livp_converter.py
 ```
 
-产物在 `dist/LIVPConverter.exe`。
+The artifact is written to `dist/LIVPConverter.exe`.
 
 ---
 
-## 技术说明
+## Technical notes
 
-### 为什么不用 `-map 0:v:0`
+### Why `-map 0:v:0` is never used
 
-HEIC 文件内部包含多个视频流，**第一个流通常是 512×512 的缩略图**，
-主图排在后面（实测 2316×3088 或 3024×4032）。
+A HEIC file contains multiple video streams, and **the first stream is usually a 512×512
+thumbnail**. The full-resolution still appears later in the file (measured at 2316×3088 or
+3024×4032 on real devices).
 
-如果用常见的 `-map 0:v:0`，导出的是缩略图（30 KB 而非 1.5 MB），画质大打折。
-本工具**不加 `-map`**，交给 ffmpeg 自动选择正确的流，才能拿到全尺寸主图。
+The commonly suggested `-map 0:v:0` would therefore export the thumbnail — roughly 30 KB
+instead of 1.5 MB — producing a significant loss of image quality.
 
-### 依赖
+This tool **omits `-map` entirely** and lets ffmpeg select the correct stream automatically,
+which yields the full-resolution image.
 
-- Python 3.8+（标准库 `zipfile` + `tkinter`）
-- [ffmpeg](https://ffmpeg.org/download.html) —— 运行时从系统 PATH 探测，不打包进 exe
+### Dependencies
 
-拍摄时间解析同样是**纯标准库**实现（`livp_meta.py` 手写 EXIF/TIFF 解析），
-没有引入 Pillow 等依赖，exe 体积不受影响。
+- Python 3.8+ (standard library only: `zipfile` + `tkinter`)
+- [ffmpeg](https://ffmpeg.org/download.html) — discovered from the system `PATH` at runtime
+  and deliberately **not** bundled into the executable
 
-### 代码结构
+Capture-time resolution is likewise implemented with the **standard library alone**
+(`livp_meta.py` contains a hand-written EXIF/TIFF parser). No dependency such as Pillow is
+introduced, so the executable size is unaffected.
 
-| 文件 | 职责 |
+### Project structure
+
+| File | Responsibility |
 |---|---|
-| `livp_converter.py` | 主程序：转换逻辑、后台线程、图形界面 |
-| `livp_meta.py` | 拍摄时间解析：EXIF → 文件名 → 修改时间三级兜底 |
-| `livp_state.py` | 任务状态持久化，支撑断点续传（原子写入，损坏自动退回空白） |
-| `make_test_livp.py` | 开发用：生成测试 `.livp`，不参与打包 |
+| `livp_converter.py` | Main application: conversion logic, background worker, GUI |
+| `livp_meta.py` | Capture-time resolution: EXIF → file name → modification time |
+| `livp_state.py` | Job state persistence backing resumable jobs (atomic writes, automatic fallback to a blank record if corrupted) |
+| `make_test_livp.py` | Development helper that generates test `.livp` files; not part of the build |
 
-## 常见问题
+## FAQ
 
-**Q：提示「未找到 ffmpeg」？**
-按上方说明安装 ffmpeg，或把 `ffmpeg.exe` 放到程序同目录。
+**Q: "ffmpeg not found" on startup?**
+Install ffmpeg as described above, or place `ffmpeg.exe` next to the application.
 
-**Q：HEIC 图片 Windows 打开不了？**
-转换输出的是 **JPG**，任何设备都能直接打开，无需额外解码器。
+**Q: Windows can't open the HEIC images?**
+The tool outputs **JPG**, which every device opens natively — no additional codec required.
 
-**Q：转换会不会改动我的原文件？**
-不会。程序只读取源文件，所有结果写入你指定的输出文件夹。
+**Q: Does the conversion modify my original files?**
+No. Source files are opened read-only and every artifact is written to the output folder
+you choose.
 
-**Q：处理速度？**
-约 1.2 秒/个（同时输出 JPG + MP4）。893 张约 18 分钟。
+**Q: How fast is it?**
+About 1.2 seconds per file when producing both JPG and MP4. A batch of 893 files takes
+roughly 18 minutes.
 
-## 许可证
+**Q: Will this read the capture time from my HEIC photos?**
+Not directly — HEIC EXIF is not parsed. Files whose names contain a timestamp
+(`IMG_20260315_102333`) are handled correctly; for others the file modification time is
+used, which may be inaccurate if the files were transferred through a messaging app.
+
+## License
 
 MIT

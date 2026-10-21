@@ -1,41 +1,52 @@
-# 贡献指南
+# Contributing
 
-感谢参与！这个项目很小，欢迎提 Issue 和 PR。
+Thanks for your interest! This is a small project, and issues and pull requests are very welcome.
 
-## 报告问题
+## Reporting a bug
 
-请附上：
+Please include:
 
-- Windows 版本
-- `.livp` 文件的内部结构（把后缀改成 `.zip` 打开，看看里面有什么）
-- 日志区的完整报错信息
+- Your Windows version
+- The internal structure of the `.livp` file (rename it to `.zip`, open it, and describe the contents)
+- The complete error message from the log panel
 
-## 开发
+## Development
 
 ```bash
 pip install -r requirements.txt
 python livp_converter.py
 ```
 
-改动后请自查：
+After making changes, please verify the following:
 
-1. 源文件能否正常打开（不报错）
-2. 转换结果的**分辨率**是否正常 —— 注意别误取到缩略图
-3. 打包后 exe 能否正常启动
+1. Source files open without errors
+2. The **resolution** of the converted output is correct — make sure you have not
+   accidentally extracted the embedded thumbnail
+3. The packaged executable starts correctly
 
 ```bash
 pyinstaller --onefile --windowed --name LIVPConverter livp_converter.py
 ```
 
-## 代码约定
+## Code conventions
 
-- 只用标准库，不引入运行时第三方依赖（ffmpeg 是外部程序，不是 pip 包）
-- 中文界面，注意 `utf-8` 编码
-- 注释说明「为什么」，尤其是 HEIC 多流这类反直觉的处理
+- Use the standard library only. Do not introduce runtime third-party dependencies
+  (ffmpeg is an external program, not a pip package)
+- The GUI is in English; keep source files UTF-8 encoded
+- Comments should explain **why**, especially for counter-intuitive handling such as
+  multi-stream HEIC files
 
-## 特别注意
+## Important
 
-**HEIC 转换时不要加 `-map 0:v:0`。**
+**Never add `-map 0:v:0` when converting HEIC files.**
 
-HEIC 内部第一个视频流通常是 512×512 缩略图，显式 map 会导出缩略图而非主图。
-必须不加 `-map`，让 ffmpeg 自动选流。详见 README「技术说明」。
+The first video stream inside a HEIC file is usually a 512×512 thumbnail, so an explicit
+`-map` would export the thumbnail instead of the full-resolution still. Omit `-map` and let
+ffmpeg select the stream automatically. See "Technical notes" in the README for details.
+
+## Translations
+
+- `README.md` — English (primary)
+- `README.zh-CN.md` — Simplified Chinese
+
+When you update one, please keep the other in sync.
