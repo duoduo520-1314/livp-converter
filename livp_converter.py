@@ -24,10 +24,12 @@ from tkinter.scrolledtext import ScrolledText
 try:
     import livp_meta
     import livp_state
+    import livp_contact
 except ImportError:      # 源码直接双击运行时也可能走到这里
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
     import livp_meta
     import livp_state
+    import livp_contact
 
 
 # ---------------------------------------------------------------- ffmpeg 发现
@@ -175,6 +177,7 @@ class Worker(threading.Thread):
         total = len(self.jobs)
         self.q.put(("total", total))
         ok = fail = skip = 0
+        no_time = 0
 
         for idx, (src, rel) in enumerate(self.jobs, 1):
             if self.stop_flag.is_set():
@@ -184,6 +187,10 @@ class Worker(threading.Thread):
             try:
                 # 拍摄时间要在建目录、算文件名之前拿到
                 t, tsrc = self._resolve_time(src)
+                if t is None:
+                    # 读不到可靠时间就不猜：保留原文件名，比用被污染的
+                    # 文件修改时间生成「看起来对、实际错」的名字安全得多
+                    no_time += 1
                 rel_dir = rel or ""
                 if self.opts.get("by_date") and t:
                     rel_dir = os.path.join(rel_dir, livp_meta.fmt_day(t)) \
@@ -265,7 +272,9 @@ class Worker(threading.Thread):
 
                 ok += 1
                 label = " + ".join(done)
-                if tsrc != "未知":
+                if t is None:
+                    label += "  [无拍摄时间，沿用原名]"
+                else:
                     label += "  [%s]" % tsrc
                 self.q.put(("progress", src))
                 self.q.put(("done", idx, src, label))
@@ -274,7 +283,7 @@ class Worker(threading.Thread):
                 fail += 1
                 self.q.put(("fail", idx, src, str(e)))
 
-        self.q.put(("finish", ok, fail, skip, self.stop_flag.is_set()))
+        self.q.put(("finish", ok, fail, skip, self.stop_flag.is_set(), no_time))
 
     def _resolve_time(self, src):
         """外层（不解压）先估一次时间，避免为不需要时间的场景付出解压代价。"""
@@ -311,7 +320,9 @@ class App(tk.Tk):
         self.var_keep = tk.BooleanVar(value=False)
         self.var_skip = tk.BooleanVar(value=True)
         self.var_by_time = tk.BooleanVar(value=False)
-        self.var_by_date = tk.BooleanVar(value=True)
+        # 默认关闭：多数相册目录（如「2024云南2日游」）本身已是有意义的组织方式，
+        # 默认按日期分层反而会把它们打散成上百个日期目录。
+        self.var_by_date = tk.BooleanVar(value=False)
         self.var_quality = tk.IntVar(value=2)
         self.var_status = tk.StringVar(value="就绪")
         self.var_count = tk.StringVar(value="尚未添加文件")
@@ -381,7 +392,7 @@ class App(tk.Tk):
         self._chk(opts, "同时保留原始 HEIC/MOV", self.var_keep).grid(row=1, column=0, sticky="w", padx=(0, 16), pady=(8, 0))
         self._chk(opts, "按拍摄时间命名（如 20260315_102333）", self.var_by_time,
                  command=self._on_by_time_toggle).grid(row=1, column=1, sticky="w", pady=(8, 0))
-        self._chk(opts, "按日期分文件夹（2026-03-15/）", self.var_by_date).grid(
+        self._chk(opts, "按日期分文件夹（在相册目录下再分 2026-03-15/）", self.var_by_date).grid(
             row=2, column=0, sticky="w", padx=(0, 16), pady=(6, 0))
 
         qf = tk.Frame(b3, bg=self.CARD)
@@ -411,6 +422,8 @@ class App(tk.Tk):
         self.btn_open.grid(row=0, column=3, padx=(6, 0))
         self.btn_clear = self._btn(b4, "清除记录", self.clear_record)
         self.btn_clear.grid(row=0, column=4, padx=(6, 0))
+        self.btn_sheet = self._btn(b4, "生成联系表", self.make_contact_sheet)
+        self.btn_sheet.grid(row=0, column=5, padx=(6, 0))
 
         # --- 进度
         f5 = self._card()
@@ -528,7 +541,21 @@ class App(tk.Tk):
 
     def _offer_resume(self):
         """启动时读取上次任务，若有未完成项就提示继续。"""
+        # 旧版本状态文件的选项语义可能已变（如「按日期分文件夹」默认值调整），
+        # 版本不符时 livp_state 会返回空白，这里如实告知用户记录已被丢弃
+        stale = False
+        try:
+            import json as _json
+            with open(livp_state.STATE_PATH, "r", encoding="utf-8") as f:
+                _d = _json.load(f)
+            stale = isinstance(_d, dict) and _d.get("version") != livp_state.STATE_VERSION
+        except Exception:
+            stale = False
+
         st = livp_state.load()
+        if stale:
+            self.write_log("检测到旧版本的任务记录，选项默认值已变更，"
+                           "该记录已忽略（不影响任何已转换的文件）。")
         alive, lost = livp_state.prune_missing(st.get("files"))
         if not alive:
             if lost:
@@ -699,6 +726,43 @@ class App(tk.Tk):
         except Exception:
             messagebox.showinfo("输出位置", d)
 
+    def make_contact_sheet(self):
+        """扫描输出目录生成 HTML 联系表，用浏览器浏览全部照片。"""
+        d = self.var_out.get().strip()
+        if not d or not os.path.isdir(d):
+            messagebox.showwarning("提示", "输出文件夹不存在或尚未生成。")
+            return
+        if not FFMPEG:
+            messagebox.showerror("缺少 ffmpeg", "生成缩略图需要 ffmpeg，请先安装。")
+            return
+
+        self.var_status.set("正在生成联系表…")
+        self.btn_sheet.config(state="disabled")
+        try:
+            entries = livp_contact.scan(d)
+            if not entries:
+                messagebox.showinfo("没有可展示的照片",
+                                    "输出文件夹里还没有 JPG 文件。\n请先执行一次转换。")
+                return
+            n = sum(len(v) for _k, v in entries)
+            self.write_log("正在为 %d 张照片生成缩略图，首次生成需要一些时间…" % n)
+            path = livp_contact.build(d, entries, FFMPEG)
+            if not path:
+                messagebox.showinfo("生成失败", "未能生成联系表。")
+                return
+            self.write_log("联系表已生成：%s" % path)
+            self.write_log("用浏览器打开即可浏览全部照片，点击可看大图，左右方向键切换。")
+            try:
+                os.startfile(path)
+            except Exception:
+                messagebox.showinfo("联系表已生成", path)
+        except Exception as e:
+            self.write_log("联系表生成失败：%s" % e)
+            messagebox.showerror("生成失败", str(e))
+        finally:
+            self.btn_sheet.config(state="normal")
+            self.var_status.set("就绪")
+
     # ---------- 运行控制
     def _check_env(self):
         if FFMPEG:
@@ -781,7 +845,8 @@ class App(tk.Tk):
                     self.bar.config(value=idx)
                     self.write_log("[%d] 失败 %s  →  %s" % (idx, os.path.basename(src), err))
                 elif kind[0] == "finish":
-                    _, ok, fail, skip, stopped = kind
+                    _, ok, fail, skip, stopped = kind[:5]
+                    no_time = kind[5] if len(kind) > 5 else 0
                     self.write_log("-" * 58)
                     parts = ["成功 %d" % ok, "失败 %d" % fail]
                     if skip:
@@ -789,6 +854,12 @@ class App(tk.Tk):
                     if stopped:
                         parts.append("已手动停止")
                     self.write_log("完成：" + "，".join(parts))
+                    if no_time:
+                        self.write_log(
+                            "⚠ 有 %d 个文件未能读到拍摄时间（EXIF 与文件名都没有），"
+                            "已保留原文件名。" % no_time)
+                        self.write_log("  文件修改时间在传输/备份后往往失真，"
+                                       "因此未用它生成文件名。")
                     self.var_status.set("已停止" if stopped else "全部完成")
                     self.btn_start.config(state="normal")
                     if (ok or skip) and not stopped:

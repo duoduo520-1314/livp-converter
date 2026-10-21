@@ -15,7 +15,9 @@ import tempfile
 import time
 
 STATE_NAME = ".livp_state.json"
-STATE_VERSION = 1
+# 选项结构变化时递增：旧记录里的选项语义可能已改变（例如何时默认按日期分目录），
+# 强行回填会让用户拿到与新版默认相悖的旧设置，直接丢弃更干净。
+STATE_VERSION = 2
 
 
 def _writable_dir():

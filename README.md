@@ -53,8 +53,9 @@ confirmed by the message `ffmpeg engine ready` in the log panel at startup.
 | **Select files** | Single or multiple selection via Ctrl / Shift |
 | **Select a folder** | Recursive scan that preserves the original subfolder structure |
 | **Resumable jobs** | Close the app mid-run and reopen it — the file list, output folder, and options are restored so you can continue where you left off |
+| **Contact sheet** | Generates a browsable HTML gallery of everything you converted, grouped by album |
 | **Timestamp-based naming** | Output files are named `20260315_102333.jpg` using the actual capture time instead of `IMG_1234` |
-| **Date-based subfolders** | Optionally organised into `2026-03-15/` subfolders, keeping multi-day shoots separate |
+| **Date-based subfolders** | Optional second-level `2026-03-15/` folders inside each album directory |
 | **Skip already converted** | Enabled by default. Files whose output already exists are not reprocessed |
 | **JPG output** | Extracts the full-resolution still, not the embedded thumbnail |
 | **MP4 output** | Transcoded to H.264 for maximum device compatibility |
@@ -64,23 +65,44 @@ confirmed by the message `ffmpeg engine ready` in the log panel at startup.
 | **Live progress and logs** | Per-file results reported in real time |
 | **Cancellable** | Stop a running job at any time |
 
+> **Folder structure**: by default your existing album folders (e.g. `2024 Yunnan trip/`)
+> are preserved and photos are renamed in place. *Group by date* is **off by default**
+> because most people already organise by album, and enabling it would scatter each
+> album across dozens of date folders. Turn it on only if your source files have no
+> meaningful folder structure.
+
 > **On capture time**: the timestamp is resolved in the following order of precedence, and
 > the log labels each file with the source that was actually used.
 > 1. **`DateTimeOriginal`** from the image EXIF metadata — the most accurate source
 > 2. Inferred from the **file name**, e.g. `IMG_20260315_102333`
-> 3. The **file modification time** — a last resort, and unreliable after transfer
->    through messaging apps
+>
+> If neither yields a time, **the original file name is kept** and the file is counted in
+> the summary. The file modification time is deliberately **not** used as a fallback: it is
+> routinely rewritten by messaging apps, backups, and bulk renaming. In one measured
+> dataset it was off by an average of 54 years, so naming files after it would produce
+> plausible-looking but entirely incorrect results.
 >
 > EXIF inside HEIC files is stored within the container and is not parsed by this tool,
-> so those files fall back to steps 2 and 3. Since most smartphone cameras already embed
-> a timestamp in the file name, the result is identical in practice. The `[EXIF]`,
-> `[file name]`, and `[mtime]` labels in the log tell you exactly which source was used.
+> so those files use the file name instead. Since most smartphone cameras already embed
+> a timestamp in the file name, this rarely matters in practice. The `[EXIF]` and
+> `[file name]` labels in the log tell you exactly which source was used.
 >
 > Multiple photos taken within the same second are automatically suffixed with `_2`, `_3`,
 > and so on, so nothing is ever overwritten.
 
 > **On GIF**: GIF encoding is slow (~2.8 s per file) and produces large files (~6 MB each).
 > A dialog reports the estimated total size when this option is enabled.
+
+## Contact sheet
+
+After converting a large batch, hunting through folders to find the right photo is
+tedious. **Generate contact sheet** scans the output folder and builds a single
+`index.html` — grouped by album, with thumbnails, a search box, and click-to-enlarge
+lightbox (arrow keys to browse). It opens in your default browser and works offline.
+
+Thumbnails are generated with ffmpeg and cached in a `.thumbs` folder, so regenerating the
+sheet for an updated batch only processes newly converted photos. For 893 photos the first
+run takes roughly 3 minutes and the resulting page is under 1 MB.
 
 ## Resuming an interrupted job
 
@@ -158,8 +180,9 @@ introduced, so the executable size is unaffected.
 | File | Responsibility |
 |---|---|
 | `livp_converter.py` | Main application: conversion logic, background worker, GUI |
-| `livp_meta.py` | Capture-time resolution: EXIF → file name → modification time |
-| `livp_state.py` | Job state persistence backing resumable jobs (atomic writes, automatic fallback to a blank record if corrupted) |
+| `livp_meta.py` | Capture-time resolution: EXIF → file name, with no unsafe guessing |
+| `livp_state.py` | Job state persistence backing resumable jobs (atomic writes, versioned so stale option defaults are not restored) |
+| `livp_contact.py` | Contact-sheet generation: thumbnail cache and HTML gallery |
 | `make_test_livp.py` | Development helper that generates test `.livp` files; not part of the build |
 
 ## FAQ
@@ -180,8 +203,13 @@ roughly 18 minutes.
 
 **Q: Will this read the capture time from my HEIC photos?**
 Not directly — HEIC EXIF is not parsed. Files whose names contain a timestamp
-(`IMG_20260315_102333`) are handled correctly; for others the file modification time is
-used, which may be inaccurate if the files were transferred through a messaging app.
+(`IMG_20260315_102333`) are handled correctly. For anything else the original file name
+is kept rather than guessing, and the summary reports how many files were affected.
+
+**Q: Why aren't my photos grouped into date folders by default?**
+Because album folders such as `2024 Yunnan trip/` are usually more meaningful than
+`2024-07-02/`, and date grouping would scatter them. The option exists and is off by
+default — enable it if your sources have no meaningful folder structure.
 
 ## License
 
