@@ -63,6 +63,7 @@ confirmed by the message `ffmpeg engine ready` in the log panel at startup.
 | **Keep originals** | Optionally preserves the source HEIC / MOV files |
 | **Quality control** | Adjustable from 1 (highest quality) to 8 (smallest size) |
 | **Live progress and logs** | Per-file results reported in real time |
+| **Filterable log** | Filter by success / failure / skipped, colour-coded, with one-click copy of the failures |
 | **Time and size estimate** | Shows how long the batch will take and how much disk space it needs, recalculated whenever you change an option |
 | **Clean up source files** | Optional. Moves `.livp` files to the Recycle Bin after a successful conversion, behind a confirmation prompt |
 | **Cancellable** | Stop a running job at any time |
@@ -109,6 +110,34 @@ how many files a previous session already completed.
 > batch of unusually large HEIC images will take longer. The point is to let you judge
 > whether a batch is worth starting — "about an hour and 5 GB" tells you something useful
 > that an empty progress bar never will.
+
+## Reading the log
+
+A batch of 893 photos produces 893 result lines, of which maybe four are failures —
+buried at lines 4, 217, 450 and 832. And tkinter's text widget has no find function,
+so hunting for them meant scrolling or copying the whole thing elsewhere.
+
+The log now carries a filter row:
+
+```
+[ 全部 (892) ]  [ 成功 (880) ]  [ 失败 (4) ]  [ 跳过 (8) ]      复制失败项
+```
+
+Click **失败** and only the four failures remain. Results are also colour-coded —
+successes green, failures red, skips orange — so a failure is visible even in
+**全部** mode without clicking anything.
+
+Two details worth knowing:
+
+- **Batch-level lines always stay visible.** When you filter down to failures you still
+  see `完成：成功 880，失败 4` at the bottom — otherwise four red lines with no context
+  would be easy to misread as "the whole batch was four files".
+- **Copy failures** puts every failure line on the clipboard in one click, ready to
+  paste into a notes file or a bug report.
+
+The counts update live during a run, so you can filter mid-conversion and watch
+failures appear. The log keeps the most recent 4,000 lines and trims older ones, so
+even a very large batch stays responsive.
 
 ## Contact sheet
 

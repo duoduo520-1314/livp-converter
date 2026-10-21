@@ -14,6 +14,7 @@ import queue
 import time
 import tempfile
 import fnmatch
+import re
 import traceback
 
 import tkinter as tk
@@ -481,9 +482,33 @@ class App(tk.Tk):
         b5 = f5._body
         self.bar = ttk.Progressbar(b5, mode="determinate", maximum=100)
         self.bar.pack(fill="x", pady=(0, 6))
+
+        # 筛选行：893 行日志里失败的可能只有 4 行，靠肉眼翻是找不到的
+        flt = tk.Frame(b5, bg=self.CARD)
+        flt.pack(fill="x", pady=(0, 6))
+        self.var_filter = tk.StringVar(value="all")
+        self.log_counts = {"all": 0, "ok": 0, "fail": 0, "skip": 0}
+        self.filter_btns = {}
+        for key, label in (("all", "全部"), ("ok", "成功"),
+                           ("fail", "失败"), ("skip", "跳过")):
+            b = tk.Button(flt, text=label, command=lambda k=key: self._set_filter(k),
+                          bg=self.CARD, fg=self.FG, relief="flat", bd=0,
+                          font=("Microsoft YaHei UI", 9), padx=10, pady=2,
+                          cursor="hand2", activebackground="#eff6ff")
+            b.pack(side="left")
+            self.filter_btns[key] = b
+        self.var_filter_label = tk.StringVar(value="尚无记录")
+        tk.Label(flt, textvariable=self.var_filter_label, bg=self.CARD, fg=self.MUTED,
+                 font=("Microsoft YaHei UI", 8)).pack(side="left", padx=(10, 0))
+        self.btn_copy_fail = self._btn(flt, "复制失败项", self._copy_failures)
+        self.btn_copy_fail.pack(side="right")
+
         self.log = ScrolledText(b5, bg=self.CARD, fg=self.FG, font=("Consolas", 9),
                                 relief="flat", wrap="none", state="disabled")
         self.log.pack(fill="both", expand=True)
+        for _tag, _color in self.LOG_TAGS:
+            self.log.tag_config(_tag, foreground=_color)
+        self._sync_filter_buttons()
         tk.Label(self, textvariable=self.var_status, bg=self.BG, fg=self.MUTED,
                  font=("Microsoft YaHei UI", 8), anchor="w").pack(fill="x", padx=pad, pady=(0, 8))
 
@@ -923,12 +948,16 @@ class App(tk.Tk):
         self.log.config(state="normal")
         self.log.delete("1.0", "end")
         self.log.config(state="disabled")
-        self.write_log("开始转换 %d 个文件 → %s" % (len(self.files), out))
+        # 新批次从零计数，否则会叠加上一轮的数字
+        for k in self.log_counts:
+            self.log_counts[k] = 0
+        self._sync_filter_buttons()
+        self.write_log("开始转换 %d 个文件 → %s" % (len(self.files), out), "meta")
         if opts["by_time"]:
-            self.write_log("命名：按拍摄时间（EXIF 优先，文件名兜底，修改时间最后兜底）")
+            self.write_log("命名：按拍摄时间（EXIF 优先，文件名兜底，修改时间最后兜底）", "meta")
         if opts["by_date"] and opts["by_time"]:
-            self.write_log("目录：按拍摄日期自动分层")
-        self.write_log("-" * 58)
+            self.write_log("目录：按拍摄日期自动分层", "meta")
+        self.write_log("-" * 58, "meta")
 
         # 新任务重开进度；续传则沿用已记录项
         self.state["done"] = [d for d in (self.state.get("done") or [])
@@ -963,61 +992,71 @@ class App(tk.Tk):
                 elif kind[0] == "done":
                     _, idx, src, made = kind
                     self.bar.config(value=idx)
-                    self.write_log("[%d] OK   %s  →  %s" % (idx, os.path.basename(src), made))
+                    # 「已存在，跳过」与真实转换成功要分开归类，
+                    # 否则点「成功」会混进几百条其实没转换的记录
+                    if made == "已存在，跳过":
+                        self.write_log("[%d] 跳过 %s  →  %s"
+                                       % (idx, os.path.basename(src), made), "skip")
+                    else:
+                        self.write_log("[%d] OK   %s  →  %s"
+                                       % (idx, os.path.basename(src), made), "ok")
                 elif kind[0] == "fail":
                     _, idx, src, err = kind
                     self.bar.config(value=idx)
-                    self.write_log("[%d] 失败 %s  →  %s" % (idx, os.path.basename(src), err))
+                    self.write_log("[%d] 失败 %s  →  %s"
+                                   % (idx, os.path.basename(src), err), "fail")
                 elif kind[0] == "cleanup_keep":
                     kept = kind[1]
                     self.write_log("有 %d 个文件的产物未确认落盘，"
-                                   "其源文件已保留：" % len(kept))
+                                   "其源文件已保留：" % len(kept), "meta")
                     for s in kept[:5]:
-                        self.write_log("· " + os.path.basename(s))
+                        self.write_log("· " + os.path.basename(s), "skip")
                     if len(kept) > 5:
-                        self.write_log("  …另有 %d 个" % (len(kept) - 5))
+                        self.write_log("  …另有 %d 个" % (len(kept) - 5), "meta")
                 elif kind[0] == "finish":
                     _, ok, fail, skip, stopped = kind[:5]
                     no_time = kind[5] if len(kind) > 5 else 0
                     cleanup = kind[6] if len(kind) > 6 else (0, 0, [])
-                    self.write_log("-" * 58)
+                    self.write_log("-" * 58, "meta")
                     parts = ["成功 %d" % ok, "失败 %d" % fail]
                     if skip:
                         parts.append("跳过 %d" % skip)
                     if stopped:
                         parts.append("已手动停止")
-                    self.write_log("完成：" + "，".join(parts))
+                    self.write_log("完成：" + "，".join(parts), "meta")
                     if no_time:
                         self.write_log(
                             "⚠ 有 %d 个文件未能读到拍摄时间（EXIF 与文件名都没有），"
-                            "已保留原文件名。" % no_time)
+                            "已保留原文件名。" % no_time, "meta")
                         self.write_log("  文件修改时间在传输/备份后往往失真，"
-                                       "因此未用它生成文件名。")
+                                       "因此未用它生成文件名。", "meta")
 
                     cok, cfail, cerrs = cleanup
                     if self.var_cleanup.get() or cok or cfail:
                         if stopped:
-                            self.write_log("已手动停止，源文件全部保留，未执行清理。")
+                            self.write_log("已手动停止，源文件全部保留，未执行清理。", "meta")
                         elif fail:
                             self.write_log("存在 %d 个失败文件，本次不清理任何源文件。"
-                                           % fail)
+                                           % fail, "meta")
                         elif cok:
                             self.write_log("已将 %d 个源 .livp 移入回收站。"
-                                           % cok)
+                                           % cok, "meta")
                             self.write_log("  回收站仍占用磁盘空间，"
-                                           "需要时请手动清空回收站；清空后不可恢复。")
+                                           "需要时请手动清空回收站；清空后不可恢复。", "meta")
                         if cfail:
-                            self.write_log("⚠ %d 个源文件未能删除，已保留：" % cfail)
+                            self.write_log("⚠ %d 个源文件未能删除，已保留：" % cfail, "meta")
                             for e in cerrs[:5]:
-                                self.write_log("  · " + e)
+                                self.write_log("  · " + e, "meta")
                             if len(cerrs) > 5:
-                                self.write_log("  …另有 %d 条" % (len(cerrs) - 5))
+                                self.write_log("  …另有 %d 条" % (len(cerrs) - 5), "meta")
 
                     self.var_status.set("已停止" if stopped else "全部完成")
                     self.btn_start.config(state="normal")
                     self.var_cleanup.set(False)   # 清理只对本次生效
                     # 本次已完成的数量进入记录，预估随之下降
                     self._refresh_estimate()
+                    # 汇总落定：让筛选按钮的计数与最终结果一致
+                    self._sync_filter_buttons()
                     if (ok or skip) and not stopped:
                         msg = "成功 %d 个" % ok
                         if fail:
@@ -1032,11 +1071,119 @@ class App(tk.Tk):
             pass
         self.after(120, self._pump)
 
-    def write_log(self, text):
+    # ---------- 日志
+    # 每类日志一个 tkinter tag：既决定颜色，也决定筛选时是否可见。
+    # 「批次」类（meta）在任何筛选下都显示 —— 用户筛出 4 条失败时，
+    # 仍需看到「共 893 个，失败 4」这个上下文，否则不知道漏了什么。
+    LOG_TAGS = (
+        ("ok", "#15803d"),# 成功：绿色
+        ("fail", "#dc2626"),    # 失败：红色
+        ("skip", "#b45309"),    # 跳过：橙色
+        ("meta", "#2563eb"),    # 批次信息：蓝色
+        ("plain", "#1f2328"),   # 其他：正文色
+    )
+
+    def write_log(self, text, kind="plain"):
+        """追加一行日志。kind 决定颜色与筛选归属。
+
+        kind: ok / fail / skip / meta / plain
+        只有 ok、fail、skip 属于「逐文件结果」，参与筛选；
+        meta 与 plain 始终可见。
+        """
         self.log.config(state="normal")
-        self.log.insert("end", text + "\n")
+        self.log.insert("end", text + "\n", kind)
+        # 逐文件结果行数会增长，超量时裁剪头部，避免 Text 无限膨胀变慢
+        self._trim_log()
         self.log.see("end")
         self.log.config(state="disabled")
+        # 转换过程中也要让按钮上的计数实时变化，便于中途点「失败」
+        if kind in self._FILTERABLE:
+            self.log_counts[kind] = self.log_counts.get(kind, 0) + 1
+            self.log_counts["all"] = sum(self.log_counts[t]
+                                         for t in self._FILTERABLE)
+            self._sync_filter_buttons()
+
+    def _trim_log(self, keep=4000):
+        """只保留最近若干行，防止上万行日志拖慢界面。"""
+        n = int(self.log.index("end-1c").split(".")[0])
+        if n <= keep:
+            return
+        self.log.delete("1.0", "%d.0" % (n - keep))
+
+    # ---------- 日志筛选
+    # 关键约定：meta 与 plain 行在任何筛选下都可见。
+    # 用户筛出 4 条失败时，仍需看到「共 893 个，失败 4」这类批次上下文，
+    # 否则会误以为整批只有 4 个文件。
+    _FILTERABLE = ("ok", "fail", "skip")
+
+    def _set_filter(self, key):
+        self.var_filter.set(key)
+        self._apply_filter()
+
+    def _apply_filter(self):
+        """按当前筛选显示/隐藏逐文件结果行，并刷新计数。"""
+        key = self.var_filter.get()
+        self.log.config(state="normal")
+        # 先全部显示，再隐藏不匹配的，避免反复切换时状态错乱。
+        # 注意：tag_cget 返回的是 Tcl 布尔，值是字符串 "0"/"1"，
+        # 不能写成 `if app.log.tag_cget(...)` —— 非空字符串恒为真。
+        for t in self._FILTERABLE:
+            self.log.tag_config(t, elide=False)
+        if key != "all":
+            for t in self._FILTERABLE:
+                if t != key:
+                    self.log.tag_config(t, elide=True)
+        self.log.config(state="disabled")
+        self._sync_filter_buttons()
+
+    def _sync_filter_buttons(self):
+        """按钮高亮 + 文案里的计数。"""
+        cur = self.var_filter.get()
+        for key, b in self.filter_btns.items():
+            if key == cur:
+                b.config(bg="#eff6ff", fg=self.ACCENT,
+                         font=("Microsoft YaHei UI", 9, "bold"))
+            else:
+                b.config(bg=self.CARD, fg=self.FG,
+                         font=("Microsoft YaHei UI", 9))
+            n = self.log_counts.get(key, 0)
+            b.config(text=("全部" if key == "all" else
+                           ("成功" if key == "ok" else
+                            ("失败" if key == "fail" else "跳过")))
+                     + (" (%d)" % n if n else ""))
+
+        total = self.log_counts["all"]
+        if total == 0:
+            self.var_filter_label.set("尚无记录")
+        elif self.var_filter.get() == "all":
+            self.var_filter_label.set("共 %d 条记录" % total)
+        else:
+            self.var_filter_label.set(
+                "显示 %d / %d 条逐文件记录"
+                % (self.log_counts.get(self.var_filter.get(), 0), total))
+        self.btn_copy_fail.config(
+            state="normal" if self.log_counts.get("fail") else "disabled")
+
+    def _copy_failures(self):
+        """把所有失败行复制到剪贴板，方便贴到记事本里排查。"""
+        lines = []
+        # tag_ranges 会把**连续**的同 tag 行合并成一个区间（如 2.0→4.0
+        # 表示第 2、3 行都是 fail），所以必须按换行拆开，不能只取首行。
+        # 另两个坑：ScrolledText 没有 tag_nextr（那是 Text 才有的）；
+        # tag_ranges 返回的是 Tcl 对象元组，需先 str() 才能正则解析。
+        raw = str(self.log.tag_ranges("fail"))
+        nums = [int(x) for x in re.findall(r"(\d+)\.\d+", raw)]
+        for lo, hi in zip(nums[0::2], nums[1::2]):
+            chunk = self.log.get("%d.0" % lo, "%d.0" % hi)
+            for one in chunk.splitlines():
+                if one.strip():
+                    lines.append(one.rstrip())
+        if not lines:
+            messagebox.showinfo("没有失败项", "本次没有转换失败的文件。")
+            return
+        self.clipboard_clear()
+        self.clipboard_append("\n".join(lines))
+        messagebox.showinfo("已复制", "已复制 %d 条失败记录到剪贴板。" % len(lines))
 
 
 def _log_fatal(exc):
