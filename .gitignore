@@ -31,3 +31,4 @@ _build.log
 _verify_exe.py
 _verify_estimate.py
 _verify_logfilter.py
+_verify_sheet.py

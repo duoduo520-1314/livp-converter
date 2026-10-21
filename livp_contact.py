@@ -353,8 +353,44 @@ applyFilter();
 """
 
 
-def build(out_root, entries, ffmpeg, thumb_dir=None):
-    """生成 index.html。entries 为 scan() 的结果。返回 html 路径。"""
+def thumb_path_for(jpg, out_root, thumb_dir):
+    """缩略图在缓存目录里的路径。命名规则与 build 保持一致。"""
+    p = os.path.join(thumb_dir,
+                     os.path.relpath(jpg, out_root).replace(os.sep, "__"))
+    return os.path.splitext(p)[0] + ".jpg"
+
+
+def count_missing(albums, out_root, thumb_dir=None):
+    """预扫描：返回 (总照片数, 缺缩略图数)。
+
+    纯 os.path.isfile 调用，893 张耗时不到 10 毫秒。用途是让用户
+    在开始前就知道「这次到底要等多久」—— 首次生成和缓存命中
+    （实测约 2 秒）体感差别巨大，不说清楚会让人以为程序没干活。
+    """
+    thumb_dir = thumb_dir or os.path.join(out_root, ".thumbs")
+    total = miss = 0
+    for _album, its in albums:
+        for jpg, _mp4, _rel in its:
+            total += 1
+            if not os.path.isfile(thumb_path_for(jpg, out_root, thumb_dir)):
+                miss += 1
+    return total, miss
+
+
+def build(out_root, entries, ffmpeg, thumb_dir=None, progress=None,
+          stop_flag=None, stats=None):
+    """生成 index.html。entries 为 scan() 的结果。返回 html 路径。
+
+    progress  回调 progress(done, total, current_name)，每处理一张调用一次。
+              传 None 则完全静默，调用方可据此判断要不要接进度条。
+    stop_flag threading.Event 或任何有 is_set() 的对象；置位后提前返回
+              None，此时不写 index.html —— 半成品页面比没有更糟。
+    stats     可选的 dict，被填入 {"photos", "cached", "generated"}
+              用于日志里如实说明本次复用了多少缓存。
+
+    线程安全：本函数供后台线程调用，不碰任何 tkinter 对象，只通过
+              progress 回调与界面通信。
+    """
     albums = entries or []
     if not albums:
         return None
@@ -364,17 +400,21 @@ def build(out_root, entries, ffmpeg, thumb_dir=None):
 
     items = []
     album_stats = []
+    total = sum(len(v) for _k, v in albums)
+    done = 0
+    cached = 0
 
     for album, its in albums:
         start = len(items)
         for jpg, mp4, rel in its:
-            tpath = os.path.join(
-                thumb_dir,
-                os.path.relpath(jpg, out_root).replace(os.sep, "__"))
-            tpath = os.path.splitext(tpath)[0] + ".jpg"
+            if stop_flag is not None and stop_flag.is_set():
+                return None            # 被取消，不写半成品页面
+            tpath = thumb_path_for(jpg, out_root, thumb_dir)
             if not os.path.isfile(tpath):
                 if not make_thumb(jpg, tpath, ffmpeg):
-                    tpath = rel          # 生成失败则退回原图
+                    tpath = rel# 生成失败则退回原图
+            else:
+                cached += 1
             # 一律用相对路径：index.html 与照片同在 out_root 下，
             # 这样整个输出目录可以随意搬移或分享，链接不会失效
             items.append({
@@ -386,9 +426,16 @@ def build(out_root, entries, ffmpeg, thumb_dir=None):
                 "v": (os.path.splitext(rel)[0] + ".mp4").replace(os.sep, "/")
                       if mp4 else "",
             })
+            done += 1
+            if progress:
+                progress(done, total, os.path.basename(jpg))
         album_stats.append({"n": album, "s": start, "c": len(its)})
 
-    total = len(items)
+    if stats is not None:
+        stats.update({"photos": len(items), "cached": cached,
+                      "generated": len(items) - cached})
+
+    n_photos = len(items)
     total_video = sum(1 for it in items if it["v"])
 
     out = ['<!DOCTYPE html><html lang="zh-CN"><head>'
@@ -413,7 +460,7 @@ def build(out_root, entries, ffmpeg, thumb_dir=None):
         '<option value="480">每页 480 张</option></select>'
         '<button onclick="location.reload()">刷新</button>'
         '<span class="count" id="cnt"></span>'
-        "</div></header>" % (total, len(albums), total_video))
+        "</div></header>" % (n_photos, len(albums), total_video))
 
     out.append('<main id="grid"></main><div id="sentinel"></div>')
     out.append('<div id="pager">'

@@ -332,6 +332,54 @@ class Worker(threading.Thread):
 
 # ---------------------------------------------------------------- 界面
 
+class SheetWorker(threading.Thread):
+    """后台生成联系表。
+
+    首次为893 张生成缩略图实测约 189 秒，此前这段跑在主线程上，
+    窗口会整整冻结三分钟并被 Windows 判定「未响应」。必须放后台。
+
+    通过 queue 回报 ('sheet', 事件, ...) ；stop_flag 允许中途放弃。
+    """
+
+    def __init__(self, out_root, entries, ffmpeg, q):
+        super().__init__(daemon=True)
+        self.out_root = out_root
+        self.entries = entries
+        self.ffmpeg = ffmpeg
+        self.q = q
+        self.stop_flag = threading.Event()
+
+    def stop(self):
+        self.stop_flag.set()
+
+    def run(self):
+        total, miss = livp_contact.count_missing(self.entries, self.out_root)
+        self.q.put(("sheet_total", total, miss))
+        if self.stop_flag.is_set():
+            self.q.put(("sheet_done", None, True, None, None))
+            return
+
+        stats = {}
+
+        def on_progress(done, _total, name):
+            # 进度回报要节流：893 张逐张 put 会把队列塞满，
+            # 每 8 张或最后一张才报一次，既跟得上又不会拖慢界面
+            if done % 8 == 0:
+                self.q.put(("sheet_progress", done, name))
+
+        try:
+            path = livp_contact.build(
+                self.out_root, self.entries, self.ffmpeg,
+                progress=on_progress, stop_flag=self.stop_flag, stats=stats)
+        except Exception as e:
+            # 消息格式必须与成功路径一致（5 元组），否则界面会把
+            # stats 当成错误信息显示成「生成失败」
+            self.q.put(("sheet_done", None, False, str(e), None))
+            return
+        stopped = self.stop_flag.is_set()
+        self.q.put(("sheet_done", path, stopped, None, stats))
+
+
 class App(tk.Tk):
     BG = "#f5f6f8"
     CARD = "#ffffff"
@@ -350,6 +398,7 @@ class App(tk.Tk):
         self.files = []           # [(绝对路径, 相对目录)]
         self.q = queue.Queue()
         self.worker = None
+        self.sheet_worker = None
 
         self.var_src = tk.StringVar()
         self.var_out = tk.StringVar()
@@ -469,11 +518,29 @@ class App(tk.Tk):
         self.btn_sheet = self._btn(b4, "生成联系表", self.make_contact_sheet)
         self.btn_sheet.grid(row=0, column=5, padx=(6, 0))
 
-        # 耗时与体积预估：选项一变就重算，让用户在开始前看到代价
+        # 联系表进度：与上方转换进度语义不同，必须独立一条。
+        # 首次生成 893 张缩略图实测约 189 秒，没有它用户面对的是
+        # 一个三分钟不响应的窗口。
+        sh = tk.Frame(b4, bg=self.CARD)
+        sh.grid(row=1, column=0, columnspan=6, sticky="ew", pady=(7, 0))
+        self.sheet_bar = ttk.Progressbar(sh, mode="determinate", maximum=100,
+                                         length=180)
+        self.sheet_bar.pack(side="left")
+        self.var_sheet = tk.StringVar(value="")
+        tk.Label(sh, textvariable=self.var_sheet, bg=self.CARD, fg=self.MUTED,
+                 font=("Microsoft YaHei UI", 8)).pack(side="left", padx=(8, 0))
+        self.btn_sheet_stop = self._btn(sh, "停止", self.stop_sheet)
+        self.btn_sheet_stop.pack(side="right")
+        # 未开始生成时整行隐藏：一条空的进度槽只是噪音。
+        # 用 grid_remove 而非 pack_forget —— 外层是 grid 管理的。
+        self._sheet_row = sh
+        sh.grid_remove()
+
+        # 耗时预估
         self.var_est = tk.StringVar()
         est = tk.Label(b4, textvariable=self.var_est, bg=self.CARD, fg=self.MUTED,
                        font=("Microsoft YaHei UI", 8), anchor="w")
-        est.grid(row=1, column=0, columnspan=6, sticky="w", pady=(7, 0))
+        est.grid(row=2, column=0, columnspan=6, sticky="w", pady=(5, 0))
 
         # --- 进度
         f5 = self._card()
@@ -876,7 +943,13 @@ class App(tk.Tk):
             messagebox.showinfo("输出位置", d)
 
     def make_contact_sheet(self):
-        """扫描输出目录生成 HTML 联系表，用浏览器浏览全部照片。"""
+        """扫描输出目录生成 HTML 联系表。
+
+        生成过程放到后台线程：首次为 893 张生成缩略图实测约 189 秒，
+        放在主线程会让窗口冻结三分钟并被系统判定「未响应」。
+        """
+        if self.sheet_worker and self.sheet_worker.is_alive():
+            return
         d = self.var_out.get().strip()
         if not d or not os.path.isdir(d):
             messagebox.showwarning("提示", "输出文件夹不存在或尚未生成。")
@@ -885,32 +958,88 @@ class App(tk.Tk):
             messagebox.showerror("缺少 ffmpeg", "生成缩略图需要 ffmpeg，请先安装。")
             return
 
+        entries = livp_contact.scan(d)
+        if not entries:
+            messagebox.showinfo("没有可展示的照片",
+                                "输出文件夹里还没有 JPG 文件。\n请先执行一次转换。")
+            return
+
+        # 预扫描只需毫秒级，却能让用户提前知道要等多久：
+        # 首次生成与缓存命中（实测约 2 秒）体感差别巨大。
+        total, miss = livp_contact.count_missing(entries, d)
+        if miss == 0:
+            self.write_log("联系表：%d 张缩略图均在缓存中，直接生成页面…" % total)
+        else:
+            self.write_log("联系表：共 %d 张，其中 %d 张需新建缩略图"
+                           "（首次生成较慢，之后点一次很快）。" % (total, miss))
+
+        self.sheet_bar.config(maximum=total, value=0)
+        self.var_sheet.set("准备中…")
         self.var_status.set("正在生成联系表…")
+        self._sheet_row.grid()
         self.btn_sheet.config(state="disabled")
+        self.btn_sheet_stop.config(state="normal")
+
+        self.sheet_worker = SheetWorker(d, entries, FFMPEG, self.q)
+        self.sheet_worker.start()
+
+    def stop_sheet(self):
+        """中途放弃生成。已缓存的缩略图保留，下次接着用。"""
+        w = self.sheet_worker
+        if w and w.is_alive():
+            w.stop()
+            self.var_sheet.set("正在停止…")
+            self.var_status.set("正在停止生成联系表…")
+
+    def _sheet_finished(self, kind):
+        """联系表生成结束（成功 / 取消 / 失败）的统一收尾。
+
+        消息固定 5 元组：(事件, path, stopped, err, stats)。
+        err 与 stats 只能有一个非 None —— 曾因两者位置不一致，
+        把 stats 当成错误信息，导致正常完成被显示成「生成失败」。
+        """
+        path, stopped = kind[1], kind[2]
+        err = kind[3] if len(kind) > 3 else None
+        stats = kind[4] if len(kind) > 4 else None
+        # 防御：err 只接受字符串，stats 只接受 dict。
+        # 曾因两者元组位置不一致，把 stats 当错误显示成「生成失败」。
+        if err is not None and not isinstance(err, str):
+            err = None
+        if stats is not None and not isinstance(stats, dict):
+            stats = None
+
+        self.btn_sheet.config(state="normal")
+        self.btn_sheet_stop.config(state="disabled")
+        self.var_status.set("就绪")
+
+        if stopped or path is None:
+            done_n = int(self.sheet_bar["maximum"])
+            got = int(self.sheet_bar["value"])
+            self.var_sheet.set("已停止（%d / %d）" % (got, done_n))
+            self.write_log("已停止生成联系表：完成 %d / %d。"
+                           "已生成的缩略图保留，下次点「生成联系表」会接着用。"
+                           % (got, done_n))
+            return
+        if err:
+            self.var_sheet.set("生成失败")
+            self.write_log("联系表生成失败：%s" % err, "fail")
+            messagebox.showerror("生成失败", str(err))
+            return
+
+        self.sheet_bar.config(value=self.sheet_bar["maximum"])
+        self.var_sheet.set("已生成 %d 张" % (stats or {}).get("photos", 0))
+        cached = (stats or {}).get("cached", 0)
+        gen = (stats or {}).get("generated", 0)
+        self.write_log("联系表已生成：%s" % path, "meta")
+        if gen or cached:
+            self.write_log("  缩略图：新建 %d 张，复用缓存 %d 张" % (gen, cached),
+                           "meta")
+        self.write_log("  用浏览器打开即可浏览，点击看大图，"
+                       "支持翻页/滚动、搜索与灯箱。", "meta")
         try:
-            entries = livp_contact.scan(d)
-            if not entries:
-                messagebox.showinfo("没有可展示的照片",
-                                    "输出文件夹里还没有 JPG 文件。\n请先执行一次转换。")
-                return
-            n = sum(len(v) for _k, v in entries)
-            self.write_log("正在为 %d 张照片生成缩略图，首次生成需要一些时间…" % n)
-            path = livp_contact.build(d, entries, FFMPEG)
-            if not path:
-                messagebox.showinfo("生成失败", "未能生成联系表。")
-                return
-            self.write_log("联系表已生成：%s" % path)
-            self.write_log("用浏览器打开即可浏览全部照片，点击可看大图，左右方向键切换。")
-            try:
-                os.startfile(path)
-            except Exception:
-                messagebox.showinfo("联系表已生成", path)
-        except Exception as e:
-            self.write_log("联系表生成失败：%s" % e)
-            messagebox.showerror("生成失败", str(e))
-        finally:
-            self.btn_sheet.config(state="normal")
-            self.var_status.set("就绪")
+            os.startfile(path)
+        except Exception:
+            messagebox.showinfo("联系表已生成", path)
 
     # ---------- 运行控制
     def _check_env(self):
@@ -981,6 +1110,17 @@ class App(tk.Tk):
                 kind = self.q.get_nowait()
                 if kind[0] == "total":
                     self.bar.config(maximum=kind[1])
+                elif kind[0] == "sheet_total":
+                    _, _total, miss = kind
+                    self.sheet_bar.config(maximum=_total, value=0)
+                    self.var_sheet.set("0 / %d（需新建 %d 张）" % (_total, miss))
+                elif kind[0] == "sheet_progress":
+                    _, done, name = kind
+                    self.sheet_bar.config(value=done)
+                    self.var_sheet.set("%d / %d  %s"
+                                       % (done, self.sheet_bar["maximum"], name))
+                elif kind[0] == "sheet_done":
+                    self._sheet_finished(kind)
                 elif kind[0] == "item":
                     self.var_status.set("(%d/%d) %s" % (kind[1], self.bar["maximum"],
                                                          os.path.basename(kind[2])))

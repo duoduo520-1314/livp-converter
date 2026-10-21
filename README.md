@@ -54,6 +54,7 @@ confirmed by the message `ffmpeg engine ready` in the log panel at startup.
 | **Select a folder** | Recursive scan that preserves the original subfolder structure |
 | **Resumable jobs** | Close the app mid-run and reopen it — the file list, output folder, and options are restored so you can continue where you left off |
 | **Contact sheet** | Generates a browsable HTML gallery of everything you converted, grouped by album, with paged or continuous-scroll browsing |
+| **Sheet progress** | Generating the sheet runs in the background with a progress bar, and can be cancelled mid-way |
 | **Timestamp-based naming** | Output files are named `20260315_102333.jpg` using the actual capture time instead of `IMG_1234` |
 | **Date-based subfolders** | Optional second-level `2026-03-15/` folders inside each album directory |
 | **Skip already converted** | Enabled by default. Files whose output already exists are not reprocessed |
@@ -149,6 +150,27 @@ lightbox (arrow keys to browse). It opens in your default browser and works offl
 Thumbnails are generated with ffmpeg and cached in a `.thumbs` folder, so regenerating the
 sheet for an updated batch only processes newly converted photos. For 893 photos the first
 run takes roughly 3 minutes and the resulting page is under 1 MB.
+
+### While it runs
+
+Generating the sheet runs on a **background thread**, so the window stays responsive —
+you can move it, scroll the log, or get on with something else. A dedicated progress bar
+shows `342 / 893` along with the file currently being processed, and a **Stop** button
+lets you give up part-way.
+
+Cancelling is safe: thumbnails already generated are kept in the cache, so the next
+attempt picks up where you left off. A half-written `index.html` is never left behind.
+
+The log says upfront how much work is actually needed:
+
+```
+联系表：共 893 张，其中 45 张需新建缩略图（首次生成较慢，之后点一次很快）。
+```
+
+That pre-scan costs under 10 ms. It matters because the two cases feel completely
+different — generating 893 thumbnails takes about three minutes, while a run where every
+thumbnail is already cached finishes in roughly two seconds. Without the distinction, the
+second run looks like the button simply did nothing.
 
 ### Two browsing modes
 
