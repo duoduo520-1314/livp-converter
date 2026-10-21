@@ -29,3 +29,4 @@ Thumbs.db
 # 打包日志
 _build.log
 _verify_exe.py
+_verify_estimate.py

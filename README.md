@@ -63,6 +63,7 @@ confirmed by the message `ffmpeg engine ready` in the log panel at startup.
 | **Keep originals** | Optionally preserves the source HEIC / MOV files |
 | **Quality control** | Adjustable from 1 (highest quality) to 8 (smallest size) |
 | **Live progress and logs** | Per-file results reported in real time |
+| **Time and size estimate** | Shows how long the batch will take and how much disk space it needs, recalculated whenever you change an option |
 | **Clean up source files** | Optional. Moves `.livp` files to the Recycle Bin after a successful conversion, behind a confirmation prompt |
 | **Cancellable** | Stop a running job at any time |
 
@@ -93,6 +94,21 @@ confirmed by the message `ffmpeg engine ready` in the log panel at startup.
 
 > **On GIF**: GIF encoding is slow (~2.8 s per file) and produces large files (~6 MB each).
 > A dialog reports the estimated total size when this option is enabled.
+
+## Time and size estimate
+
+A line under the action buttons shows how long the current batch will take and how much
+disk space it will use. It recalculates immediately whenever you add files or change an
+option — tick GIF or drop the quality slider and watch the numbers move.
+
+The estimate is derived from measurements on a real batch of 893 photos (17 albums) and
+accounts for the JPG/MP4 baseline, GIF encoding, kept originals, the quality setting, and
+how many files a previous session already completed.
+
+> It is an **estimate, not a promise**. It assumes roughly constant per-file cost, so a
+> batch of unusually large HEIC images will take longer. The point is to let you judge
+> whether a batch is worth starting — "about an hour and 5 GB" tells you something useful
+> that an empty progress bar never will.
 
 ## Contact sheet
 
@@ -241,6 +257,7 @@ introduced, so the executable size is unaffected.
 | `livp_contact.py` | Contact-sheet generation: thumbnail cache and HTML gallery, with paged and continuous-scroll rendering over a shared slice renderer |
 | `livp_cleanup.py` | Optional source-file cleanup via the Windows Recycle Bin (ctypes `SHFileOperationW`, no permanent delete) |
 | `make_test_livp.py` | Development helper that generates test `.livp` files; not part of the build |
+| `livp_estimate.py` | Time and size estimation from measured per-file costs; kept separate so the figures are testable |
 
 ## FAQ
 

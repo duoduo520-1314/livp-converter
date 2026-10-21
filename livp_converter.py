@@ -26,12 +26,14 @@ try:
     import livp_state
     import livp_contact
     import livp_cleanup
+    import livp_estimate
 except ImportError:      # 源码直接双击运行时也可能走到这里
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
     import livp_meta
     import livp_state
     import livp_contact
     import livp_cleanup
+    import livp_estimate
 
 
 # ---------------------------------------------------------------- ffmpeg 发现
@@ -369,6 +371,7 @@ class App(tk.Tk):
         self.resume_banner = None
 
         self._build()
+        self._bind_estimate()
         self._pump()
         self._check_env()
         self._offer_resume()
@@ -464,6 +467,12 @@ class App(tk.Tk):
         self.btn_clear.grid(row=0, column=4, padx=(6, 0))
         self.btn_sheet = self._btn(b4, "生成联系表", self.make_contact_sheet)
         self.btn_sheet.grid(row=0, column=5, padx=(6, 0))
+
+        # 耗时与体积预估：选项一变就重算，让用户在开始前看到代价
+        self.var_est = tk.StringVar()
+        est = tk.Label(b4, textvariable=self.var_est, bg=self.CARD, fg=self.MUTED,
+                       font=("Microsoft YaHei UI", 8), anchor="w")
+        est.grid(row=1, column=0, columnspan=6, sticky="w", pady=(7, 0))
 
         # --- 进度
         f5 = self._card()
@@ -606,6 +615,13 @@ class App(tk.Tk):
         done = [f[0] for f in alive if f[0] in set(st.get("done") or [])]
         left = len(alive) - len(done)
         if left == 0:
+            # 全部完成也要把文件填回列表，否则日志说「可直接开始新任务」
+            # 但列表其实是空的，用户点开始只会得到「请先选择文件」
+            self.files = list(alive)
+            if not self.var_src.get():
+                self.var_src.set(st.get("src_label") or "")
+            if st.get("out_root") and not self.var_out.get():
+                self.var_out.set(st["out_root"])
             self._restore(st, alive)
             self.write_log("已恢复上次任务：%d 个文件均已完成，可直接开始新任务。"
                            % len(alive))
@@ -671,6 +687,7 @@ class App(tk.Tk):
             self.state = {"files": [], "out_root": "", "src_label": "",
                           "opts": {}, "done": [], "updated": 0.0}
             self._hide_resume()
+            self._refresh_estimate()
             self.write_log("已清除任务记录。")
 
     def _on_cleanup_toggle(self):
@@ -796,6 +813,27 @@ class App(tk.Tk):
                                % (todo, len(self.files) - todo))
         else:
             self.var_count.set("待转换：%d 个 .livp 文件" % len(self.files))
+        self._refresh_estimate()
+
+    def _refresh_estimate(self):
+        """按当前文件数与选项重算耗时/体积预估。"""
+        if not hasattr(self, "var_est"):
+            return
+        # done 里可能含已不在列表中的源文件，只按仍存在的部分计
+        alive = {p for p, _ in self.files}
+        done = len([d for d in (self.state.get("done") or []) if d in alive])
+        self.var_est.set(
+            livp_estimate.describe(len(self.files), self._collect_opts(), done))
+
+    def _bind_estimate(self):
+        """把预估绑定到所有会影响代价的选项上。
+
+        注意：var_cleanup 不影响耗时与产物体积（只影响源文件去向），
+        故不纳入。
+        """
+        for var in (self.var_mp4, self.var_gif, self.var_keep,
+                    self.var_quality, self.var_skip, self.var_by_time):
+            var.trace_add("write", lambda *_a: self._refresh_estimate())
 
     def pick_out(self):
         d = filedialog.askdirectory(title="选择输出文件夹")
@@ -978,6 +1016,8 @@ class App(tk.Tk):
                     self.var_status.set("已停止" if stopped else "全部完成")
                     self.btn_start.config(state="normal")
                     self.var_cleanup.set(False)   # 清理只对本次生效
+                    # 本次已完成的数量进入记录，预估随之下降
+                    self._refresh_estimate()
                     if (ok or skip) and not stopped:
                         msg = "成功 %d 个" % ok
                         if fail:
