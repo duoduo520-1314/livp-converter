@@ -107,7 +107,11 @@ class Converter:
 
     @staticmethod
     def to_gif(mov_path, out_path, fps=12, width=480):
-        """MOV -> GIF，方便直接发微信/社交平台。"""
+        """MOV -> GIF，方便直接发微信/社交平台。
+
+        注意：GIF 体积大、生成慢（约 2.8s/个，且单文件常达数 MB），
+        默认关闭。需要时应主动提示用户体积代价。
+        """
         vf = ("fps=%d,scale=%d:-1:flags=lanczos,split[a][b];[a]palettegen=max_colors=128[p];[b][p]paletteuse"
               % (fps, width))
         cmd = [FFMPEG, "-y", "-hide_banner", "-loglevel", "error",
@@ -150,6 +154,18 @@ class Worker(threading.Thread):
                 jpg = os.path.join(dst_dir, stem + ".jpg")
                 mp4 = os.path.join(dst_dir, stem + ".mp4")
                 gif = os.path.join(dst_dir, stem + ".gif")
+
+                # 「跳过已转换」：主产物都存在则不再处理，避免重复耗时
+                if self.opts.get("skip_existing"):
+                    have = os.path.isfile(jpg) and os.path.getsize(jpg) > 0
+                    if self.opts.get("mp4", True):
+                        have = have and os.path.isfile(mp4) and os.path.getsize(mp4) > 0
+                    if self.opts.get("gif", False):
+                        have = have and os.path.isfile(gif) and os.path.getsize(gif) > 0
+                    if have:
+                        skip += 1
+                        self.q.put(("done", idx, src, "已存在，跳过"))
+                        continue
 
                 done = []
                 work = tempfile.mkdtemp(prefix="livp_")
@@ -222,6 +238,7 @@ class App(tk.Tk):
         self.var_mp4 = tk.BooleanVar(value=True)
         self.var_gif = tk.BooleanVar(value=False)
         self.var_keep = tk.BooleanVar(value=False)
+        self.var_skip = tk.BooleanVar(value=True)
         self.var_quality = tk.IntVar(value=2)
         self.var_status = tk.StringVar(value="就绪")
         self.var_count = tk.StringVar(value="尚未添加文件")
@@ -267,6 +284,8 @@ class App(tk.Tk):
         self._btn(b2, "浏览", self.pick_out, primary=True).grid(row=0, column=2)
         self._chk(b2, "保留原有子文件夹结构", self.var_preserve).grid(
             row=1, column=1, sticky="w", pady=(4, 0))
+        self._chk(b2, "跳过已转换（输出已存在时不重复处理）", self.var_skip).grid(
+            row=1, column=2, sticky="w", pady=(4, 0))
 
         # --- 选项
         f3 = self._card()
@@ -278,8 +297,9 @@ class App(tk.Tk):
         self._chk(opts, "输出 JPG 照片（必选）", tk.BooleanVar(value=True), state="disabled") \
             .grid(row=0, column=0, sticky="w", padx=(0, 16))
         self._chk(opts, "输出 MP4 视频", self.var_mp4).grid(row=0, column=1, sticky="w", padx=(0, 16))
-        self._chk(opts, "输出 GIF 动图", self.var_gif).grid(row=0, column=2, sticky="w")
-        self._chk(opts, "同时保留原始 HEIC/MOV", self.var_keep).grid(row=1, column=0, sticky="w", pady=(8, 0))
+        self._chk(opts, "输出 GIF 动图", self.var_gif,
+                 command=self._on_gif_toggle).grid(row=0, column=2, sticky="w")
+        self._chk(opts, "同时保留原始 HEIC/MOV", self.var_keep).grid(row=1, column=0, sticky="w", padx=(0, 16), pady=(8, 0))
 
         qf = tk.Frame(b3, bg=self.CARD)
         qf.grid(row=1, column=0, sticky="w", pady=(8, 0))
@@ -346,14 +366,33 @@ class App(tk.Tk):
             b.configure(padding=(18, 7))
         return b
 
-    def _chk(self, parent, text, var, state="normal"):
+    def _chk(self, parent, text, var, state="normal", command=None):
         return tk.Checkbutton(parent, text=text, variable=var, bg=self.CARD, fg=self.FG,
                               activebackground=self.CARD, activeforeground=self.FG,
-                              selectcolor=self.CARD, font=("Microsoft YaHei UI", 9), state=state)
+                              selectcolor=self.CARD, font=("Microsoft YaHei UI", 9),
+                              state=state, command=command)
 
     def _update_quality(self, v):
         names = {1: "极高", 2: "很高", 3: "高", 4: "较高", 5: "中", 6: "较低", 7: "低", 8: "很小"}
         self.qual_text.config(text=names.get(int(float(v)), "-"))
+
+    def _on_gif_toggle(self):
+        """勾选 GIF 时提示体积代价 —— 实测约 6MB/个，量大时占用惊人。"""
+        if not self.var_gif.get():
+            return
+        n = len(self.files)
+        if n == 0:
+            return
+        est = n * 6      # 实测单文件约 6MB
+        if est < 200:
+            hint = "当前 %d 个文件，预计占用约 %d MB。" % (n, est)
+        else:
+            hint = ("当前 %d 个文件，预计占用约 %.1f GB，且生成速度明显变慢。"
+                    % (n, est / 1024))
+        if not messagebox.askyesno("确认生成 GIF？",
+                                   "GIF 动图体积较大、生成较慢。\n\n%s\n\n是否继续？"
+                                   % hint):
+            self.var_gif.set(False)
 
     # ---------- 样式
     def _style(self):
@@ -483,7 +522,10 @@ class App(tk.Tk):
             "mp4": self.var_mp4.get(),
             "gif": self.var_gif.get(),
             "keep_heic": self.var_keep.get(),
+            # 「保留原始文件」同时保留 HEIC 与 MOV，与界面文字保持一致
+            "keep_mov": self.var_keep.get(),
             "quality": self.var_quality.get(),
+            "skip_existing": self.var_skip.get(),
         }
         self.log.config(state="normal")
         self.log.delete("1.0", "end")
@@ -520,14 +562,24 @@ class App(tk.Tk):
                     self.bar.config(value=idx)
                     self.write_log("[%d] 失败 %s  →  %s" % (idx, os.path.basename(src), err))
                 elif kind[0] == "finish":
-                    _, ok, fail, _skip, stopped = kind
+                    _, ok, fail, skip, stopped = kind
                     self.write_log("-" * 58)
-                    self.write_log("完成：成功 %d，失败 %d%s" % (ok, fail, "（已手动停止）" if stopped else ""))
+                    parts = ["成功 %d" % ok, "失败 %d" % fail]
+                    if skip:
+                        parts.append("跳过 %d" % skip)
+                    if stopped:
+                        parts.append("已手动停止")
+                    self.write_log("完成：" + "，".join(parts))
                     self.var_status.set("已停止" if stopped else "全部完成")
                     self.btn_start.config(state="normal")
-                    if ok and not stopped:
-                        messagebox.showinfo("转换完成", "成功 %d 个，失败 %d 个。\n\n输出位置：%s"
-                                            % (ok, fail, self.var_out.get()))
+                    if (ok or skip) and not stopped:
+                        msg = "成功 %d 个" % ok
+                        if fail:
+                            msg += "，失败 %d 个" % fail
+                        if skip:
+                            msg += "，跳过 %d 个（已存在）" % skip
+                        messagebox.showinfo("转换完成", msg + "。\n\n输出位置：%s"
+                                            % self.var_out.get())
         except queue.Empty:
             pass
         self.after(120, self._pump)
