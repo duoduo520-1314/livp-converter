@@ -23,7 +23,7 @@ xxx.livp
 
 ## 直接使用（推荐）
 
-1. 到 [Releases](https://github.com/你的用户名/livp-converter/releases) 下载 `LIVPConverter.exe`
+1. 到 [Releases](https://github.com/duoduo520-1314/livp-converter/releases) 下载 `LIVPConverter.exe`
 2. 双击运行，无需安装
 3. 三步搞定：
    - **选择文件**（可多选）或 **选择文件夹**（自动递归查找所有 `.livp`）
