@@ -20,6 +20,15 @@ import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 from tkinter.scrolledtext import ScrolledText
 
+# 同目录模块（打包成 exe 后由 pyinstaller 一并收集）
+try:
+    import livp_meta
+    import livp_state
+except ImportError:      # 源码直接双击运行时也可能走到这里
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    import livp_meta
+    import livp_state
+
 
 # ---------------------------------------------------------------- ffmpeg 发现
 
@@ -124,18 +133,43 @@ class Converter:
 # ---------------------------------------------------------------- 工作线程
 
 class Worker(threading.Thread):
-    """后台线程池：逐个转换，通过 queue 与界面通信。"""
+    """后台线程池：逐个转换，通过 queue 与界面通信。
 
-    def __init__(self, jobs, out_root, opts, q):
+    每完成/跳过一个文件就回报 ('progress', src)，界面据此增量落盘状态，
+    实现「关掉程序再打开能接着上次继续」。
+    """
+
+    def __init__(self, jobs, out_root, opts, q, used=()):
         super().__init__(daemon=True)
         self.jobs = jobs
         self.out_root = out_root
         self.opts = opts
         self.q = q
         self.stop_flag = threading.Event()
+        # 本次运行已占用的输出文件名，用于同一秒连拍时防覆盖
+        self.used = set(used or ())
 
     def stop(self):
         self.stop_flag.set()
+
+    def _unique(self, path):
+        """同一时间戳可能对应连拍的多张，追加 _2/_3 保证不互相覆盖。
+
+        无论最终用哪个名字，都会把「标准名」登记进 used —— 后续同标准名的
+        文件若再走skip 检查就能识别出「这是本轮刚产出的」，不会漏转换。
+        """
+        std = path
+        if path not in self.used and not os.path.exists(path):
+            self.used.add(path)
+            return path
+        base, ext = os.path.splitext(path)
+        for i in range(2, 10000):
+            cand = "%s_%d%s" % (base, i, ext)
+            if cand not in self.used and not os.path.exists(cand):
+                self.used.add(cand)
+                self.used.add(std)
+                return cand
+        return path
 
     def run(self):
         total = len(self.jobs)
@@ -146,26 +180,47 @@ class Worker(threading.Thread):
             if self.stop_flag.is_set():
                 break
             self.q.put(("item", idx, src))
-            dst_dir = os.path.join(self.out_root, rel) if rel else self.out_root
-            stem = os.path.splitext(os.path.basename(src))[0]
 
             try:
-                os.makedirs(dst_dir, exist_ok=True)
-                jpg = os.path.join(dst_dir, stem + ".jpg")
-                mp4 = os.path.join(dst_dir, stem + ".mp4")
-                gif = os.path.join(dst_dir, stem + ".gif")
+                # 拍摄时间要在建目录、算文件名之前拿到
+                t, tsrc = self._resolve_time(src)
+                rel_dir = rel or ""
+                if self.opts.get("by_date") and t:
+                    rel_dir = os.path.join(rel_dir, livp_meta.fmt_day(t)) \
+                        if rel_dir else livp_meta.fmt_day(t)
 
-                # 「跳过已转换」：主产物都存在则不再处理，避免重复耗时
-                if self.opts.get("skip_existing"):
-                    have = os.path.isfile(jpg) and os.path.getsize(jpg) > 0
+                dst_dir = os.path.join(self.out_root, rel_dir) if rel_dir else self.out_root
+                if self.opts.get("by_time") and t:
+                    stem = livp_meta.fmt_stamp(t)
+                else:
+                    stem = os.path.splitext(os.path.basename(src))[0]
+
+                os.makedirs(dst_dir, exist_ok=True)
+                # 先算「标准名」：skip 检查必须基于它，否则续传时因 _unique 改名而永远命不中
+                base_jpg = os.path.join(dst_dir, stem + ".jpg")
+                base_mp4 = os.path.join(dst_dir, stem + ".mp4")
+                base_gif = os.path.join(dst_dir, stem + ".gif")
+
+                # 「跳过已转换」：主产物都存在、且不是本次运行刚产出的同名文件时才跳过。
+                # 后半条很关键——同一秒连拍的多张标准名相同，若只判文件存在会漏转换。
+                if self.opts.get("skip_existing") and base_jpg not in self.used:
+                    have = os.path.isfile(base_jpg) and os.path.getsize(base_jpg) > 0
                     if self.opts.get("mp4", True):
-                        have = have and os.path.isfile(mp4) and os.path.getsize(mp4) > 0
+                        have = have and os.path.isfile(base_mp4) \
+                            and os.path.getsize(base_mp4) > 0
                     if self.opts.get("gif", False):
-                        have = have and os.path.isfile(gif) and os.path.getsize(gif) > 0
+                        have = have and os.path.isfile(base_gif) \
+                            and os.path.getsize(base_gif) > 0
                     if have:
                         skip += 1
+                        self.q.put(("progress", src))
                         self.q.put(("done", idx, src, "已存在，跳过"))
                         continue
+
+                # 确需产出时才占用名字：同一秒连拍得到 _2 / _3，互不覆盖
+                jpg = self._unique(base_jpg)
+                mp4 = os.path.join(dst_dir, os.path.splitext(jpg)[0] + ".mp4")
+                gif = os.path.join(dst_dir, os.path.splitext(jpg)[0] + ".gif")
 
                 done = []
                 work = tempfile.mkdtemp(prefix="livp_")
@@ -174,9 +229,16 @@ class Worker(threading.Thread):
 
                     if img is None:
                         raise RuntimeError("容器内未找到图片")
+
+                    # 拿到容器内真实图片后，用 EXIF 再确认一次拍摄时间
+                    if self.opts.get("by_time") and tsrc != "EXIF":
+                        t2, tsrc2 = livp_meta.shot_time(src, img)
+                        if t2 and tsrc2 == "EXIF":
+                            t, tsrc = t2, tsrc2
+
                     if self.opts.get("keep_heic"):
                         src_ext = os.path.splitext(img)[1].lower()
-                        keep = os.path.join(dst_dir, stem + src_ext)
+                        keep = os.path.join(dst_dir, os.path.splitext(jpg)[0] + src_ext)
                         if not os.path.exists(keep):
                             shutil.copy2(img, keep)
                         done.append("原图")
@@ -192,7 +254,7 @@ class Worker(threading.Thread):
                             Converter.to_gif(vid, gif, self.opts.get("gif_fps", 12))
                             done.append("GIF")
                         if self.opts.get("keep_mov", False):
-                            keep = os.path.join(dst_dir, stem + ".mov")
+                            keep = os.path.join(dst_dir, os.path.splitext(jpg)[0] + ".mov")
                             if not os.path.exists(keep):
                                 shutil.copy2(vid, keep)
                             done.append("MOV")
@@ -202,13 +264,22 @@ class Worker(threading.Thread):
                     shutil.rmtree(work, ignore_errors=True)
 
                 ok += 1
-                self.q.put(("done", idx, src, " + ".join(done)))
+                label = " + ".join(done)
+                if tsrc != "未知":
+                    label += "  [%s]" % tsrc
+                self.q.put(("progress", src))
+                self.q.put(("done", idx, src, label))
 
             except Exception as e:
                 fail += 1
                 self.q.put(("fail", idx, src, str(e)))
 
         self.q.put(("finish", ok, fail, skip, self.stop_flag.is_set()))
+
+    def _resolve_time(self, src):
+        """外层（不解压）先估一次时间，避免为不需要时间的场景付出解压代价。"""
+        t, tsrc = livp_meta.shot_time(src)
+        return t, tsrc
 
 
 # ---------------------------------------------------------------- 界面
@@ -239,13 +310,20 @@ class App(tk.Tk):
         self.var_gif = tk.BooleanVar(value=False)
         self.var_keep = tk.BooleanVar(value=False)
         self.var_skip = tk.BooleanVar(value=True)
+        self.var_by_time = tk.BooleanVar(value=False)
+        self.var_by_date = tk.BooleanVar(value=True)
         self.var_quality = tk.IntVar(value=2)
         self.var_status = tk.StringVar(value="就绪")
         self.var_count = tk.StringVar(value="尚未添加文件")
 
+        self.state = {"files": [], "out_root": "", "src_label": "",
+                      "opts": {}, "done": [], "updated": 0.0}
+        self.resume_banner = None
+
         self._build()
         self._pump()
         self._check_env()
+        self._offer_resume()
 
     # ---------- 界面构建
     def _build(self):
@@ -260,6 +338,7 @@ class App(tk.Tk):
         # --- 源
         f1 = self._card()
         f1.pack(fill="x", padx=pad, pady=(12, 0))
+        self._card_anchor = f1
         self._title(f1, "① 选择要转换的文件")
         b1 = f1._body
         tk.Label(b1, text="来源", bg=self.CARD, fg=self.MUTED, width=6,
@@ -300,6 +379,10 @@ class App(tk.Tk):
         self._chk(opts, "输出 GIF 动图", self.var_gif,
                  command=self._on_gif_toggle).grid(row=0, column=2, sticky="w")
         self._chk(opts, "同时保留原始 HEIC/MOV", self.var_keep).grid(row=1, column=0, sticky="w", padx=(0, 16), pady=(8, 0))
+        self._chk(opts, "按拍摄时间命名（如 20260315_102333）", self.var_by_time,
+                 command=self._on_by_time_toggle).grid(row=1, column=1, sticky="w", pady=(8, 0))
+        self._chk(opts, "按日期分文件夹（2026-03-15/）", self.var_by_date).grid(
+            row=2, column=0, sticky="w", padx=(0, 16), pady=(6, 0))
 
         qf = tk.Frame(b3, bg=self.CARD)
         qf.grid(row=1, column=0, sticky="w", pady=(8, 0))
@@ -326,6 +409,8 @@ class App(tk.Tk):
         self.btn_stop.grid(row=0, column=2, padx=(6, 0))
         self.btn_open = self._btn(b4, "打开输出文件夹", self.open_out)
         self.btn_open.grid(row=0, column=3, padx=(6, 0))
+        self.btn_clear = self._btn(b4, "清除记录", self.clear_record)
+        self.btn_clear.grid(row=0, column=4, padx=(6, 0))
 
         # --- 进度
         f5 = self._card()
@@ -395,6 +480,128 @@ class App(tk.Tk):
             self.var_gif.set(False)
 
     # ---------- 样式
+    def _on_by_time_toggle(self):
+        """勾选「按拍摄时间命名」时说明时间从哪来，避免用户以为是文件修改时间。"""
+        if not self.var_by_time.get():
+            return
+        if len(self.files) < 2:
+            return
+        if not messagebox.askyesno(
+                "命名规则说明",
+                "开启后将按「拍摄时间」重命名产物：\n\n"
+                "• 优先读取照片 EXIF 里的拍摄时间（最准确）\n"
+                "• 读不到时从文件名推断（如 IMG_20260315_102333）\n"
+                "• 仍读不到才用文件修改时间\n\n"
+                "同一秒内的连拍会自动追加序号，不会互相覆盖。\n\n"
+                "是否继续？"):
+            self.var_by_time.set(False)
+
+    # ---------- 断点续传
+    def _show_resume(self, text):
+        """顶部显示一条可关闭的续传提示。"""
+        self._hide_resume()
+        bar = tk.Frame(self, bg="#eff6ff", highlightbackground="#bfdbfe",
+                       highlightthickness=1)
+        lbl = tk.Label(bar, text=text, bg="#eff6ff", fg="#1e40af",
+                       font=("Microsoft YaHei UI", 9), anchor="w", justify="left")
+        lbl.pack(side="left", fill="x", expand=True, padx=(12, 6), pady=8)
+        b = tk.Button(bar, text="✕", command=self._hide_resume, bg="#eff6ff",
+                      fg="#1e40af", relief="flat", bd=0, font=("Microsoft YaHei UI", 9))
+        b.pack(side="right", padx=(0, 8))
+        b2 = tk.Button(bar, text="清除记录", command=self.clear_record, bg="#eff6ff",
+                       fg="#1e40af", relief="flat", bd=0, font=("Microsoft YaHei UI", 8))
+        b2.pack(side="right", padx=(0, 2))
+        bar.pack(fill="x", padx=16, pady=(12, 0), before=self._first_card())
+        self.resume_banner = bar
+
+    def _hide_resume(self):
+        if self.resume_banner is not None:
+            try:
+                self.resume_banner.destroy()
+            except Exception:
+                pass
+            self.resume_banner = None
+
+    def _first_card(self):
+        """选项区之后的第一张卡片，用于 pack(before=...) 定位。"""
+        return getattr(self, "_card_anchor", None) or self.winfo_children()[0]
+
+    def _offer_resume(self):
+        """启动时读取上次任务，若有未完成项就提示继续。"""
+        st = livp_state.load()
+        alive, lost = livp_state.prune_missing(st.get("files"))
+        if not alive:
+            if lost:
+                self.write_log("上次任务的 %d 个源文件已不存在，已忽略。" % lost)
+            return
+
+        self.state = st
+        done = [f[0] for f in alive if f[0] in set(st.get("done") or [])]
+        left = len(alive) - len(done)
+        if left == 0:
+            self._restore(st, alive)
+            self.write_log("已恢复上次任务：%d 个文件均已完成，可直接开始新任务。"
+                           % len(alive))
+            return
+
+        self.files = list(alive)
+        self.var_src.set(st.get("src_label") or "")
+        if st.get("out_root"):
+            self.var_out.set(st["out_root"])
+        self._restore(st, alive, skip_done=False)
+        if lost:
+            self.write_log("上次任务中 %d 个源文件已丢失，已从列表移除。" % lost)
+        self._show_resume(
+            "发现上次未完成的任务：共 %d 个文件，已完成 %d 个，还剩 %d 个。"
+            "点「开始转换」即可接着上次继续。\n输出位置：%s"
+            % (len(alive), len(done), left, st.get("out_root") or "（未设置）"))
+
+    def _restore(self, st, alive, skip_done=True):
+        """把状态里的选项回填到界面。"""
+        o = st.get("opts") or {}
+        for key, var in (("mp4", self.var_mp4), ("gif", self.var_gif),
+                         ("keep_heic", self.var_keep), ("skip_existing", self.var_skip),
+                         ("by_time", self.var_by_time), ("by_date", self.var_by_date)):
+            if key in o:
+                var.set(bool(o[key]))
+        try:
+            self.var_quality.set(int(o.get("quality", 2)))
+        except Exception:
+            pass
+        self._refresh()
+
+    def _collect_opts(self):
+        return {
+            "mp4": self.var_mp4.get(),
+            "gif": self.var_gif.get(),
+            "keep_heic": self.var_keep.get(),
+            # 「保留原始文件」同时保留 HEIC 与 MOV，与界面文字保持一致
+            "keep_mov": self.var_keep.get(),
+            "quality": self.var_quality.get(),
+            "skip_existing": self.var_skip.get(),
+            "by_time": self.var_by_time.get(),
+            "by_date": self.var_by_date.get(),
+        }
+
+    def _persist(self):
+        """把当前任务落盘，供下次续传。"""
+        self.state["files"] = [list(f) for f in self.files]
+        self.state["out_root"] = self.var_out.get().strip()
+        self.state["src_label"] = self.var_src.get()
+        self.state["opts"] = self._collect_opts()
+        livp_state.save(self.state)
+
+    def clear_record(self):
+        """清除续传记录。"""
+        if messagebox.askyesno("清除记录",
+                               "将删除本机的任务记录（不影响任何已转换的文件）。\n\n"
+                               "下次启动不会自动恢复上次的列表。\n\n是否继续？"):
+            livp_state.clear()
+            self.state = {"files": [], "out_root": "", "src_label": "",
+                          "opts": {}, "done": [], "updated": 0.0}
+            self._hide_resume()
+            self.write_log("已清除任务记录。")
+
     def _style(self):
         st = ttk.Style(self)
         try:
@@ -469,7 +676,13 @@ class App(tk.Tk):
         self._refresh()
 
     def _refresh(self):
-        self.var_count.set("待转换：%d 个 .livp 文件" % len(self.files))
+        done = set(self.state.get("done") or [])
+        todo = len([f for f in self.files if f[0] not in done])
+        if todo and todo < len(self.files):
+            self.var_count.set("待转换：%d 个（另有 %d 个上次已完成）"
+                               % (todo, len(self.files) - todo))
+        else:
+            self.var_count.set("待转换：%d 个 .livp 文件" % len(self.files))
 
     def pick_out(self):
         d = filedialog.askdirectory(title="选择输出文件夹")
@@ -518,20 +731,21 @@ class App(tk.Tk):
                                           "请另选一个位置，避免结果与原文件混杂。")
             return
 
-        opts = {
-            "mp4": self.var_mp4.get(),
-            "gif": self.var_gif.get(),
-            "keep_heic": self.var_keep.get(),
-            # 「保留原始文件」同时保留 HEIC 与 MOV，与界面文字保持一致
-            "keep_mov": self.var_keep.get(),
-            "quality": self.var_quality.get(),
-            "skip_existing": self.var_skip.get(),
-        }
+        opts = self._collect_opts()
         self.log.config(state="normal")
         self.log.delete("1.0", "end")
         self.log.config(state="disabled")
         self.write_log("开始转换 %d 个文件 → %s" % (len(self.files), out))
+        if opts["by_time"]:
+            self.write_log("命名：按拍摄时间（EXIF 优先，文件名兜底，修改时间最后兜底）")
+        if opts["by_date"] and opts["by_time"]:
+            self.write_log("目录：按拍摄日期自动分层")
         self.write_log("-" * 58)
+
+        # 新任务重开进度；续传则沿用已记录项
+        self.state["done"] = [d for d in (self.state.get("done") or [])
+                              if d in {p for p, _ in self.files}]
+        self._persist()
 
         self.btn_start.config(state="disabled")
         self.bar.config(maximum=len(self.files), value=0)
@@ -553,6 +767,11 @@ class App(tk.Tk):
                 elif kind[0] == "item":
                     self.var_status.set("(%d/%d) %s" % (kind[1], self.bar["maximum"],
                                                          os.path.basename(kind[2])))
+                elif kind[0] == "progress":
+                    # 每完成一个就落盘，中途关闭程序也不丢进度
+                    if kind[1] not in self.state["done"]:
+                        self.state["done"].append(kind[1])
+                        self._persist()
                 elif kind[0] == "done":
                     _, idx, src, made = kind
                     self.bar.config(value=idx)

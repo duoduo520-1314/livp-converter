@@ -3,6 +3,9 @@ dist/
 build/
 *.spec
 
+# 本机任务记录（断点续传状态，含用户本地路径）
+.livp_state.json
+
 # Python
 __pycache__/
 *.py[cod]
