@@ -33,15 +33,19 @@ jobs:
           }
           Get-Item dist\LIVPConverter.exe | Select-Object Name, Length
 
+      - name: Upload exe as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: LIVPConverter
+          path: dist/LIVPConverter.exe
+
+      # 需要仓库 Settings → Actions → Workflow permissions 设为
+      # "Read and write permissions" 才能自动创建 Release。
+      # 若未开启，此步会因 403 失败，但不影响 exe 构建与 artifact 下载。
       - name: Upload to Release
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
           files: dist/LIVPConverter.exe
-
-      - name: Upload artifact (no tag)
-        if: ${{ !startsWith(github.ref, 'refs/tags/') }}
-        uses: actions/upload-artifact@v4
-        with:
-          name: LIVPConverter
-          path: dist/LIVPConverter.exe
+          fail_on_unmatched_files: false
+        continue-on-error: true
