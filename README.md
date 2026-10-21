@@ -63,6 +63,7 @@ confirmed by the message `ffmpeg engine ready` in the log panel at startup.
 | **Keep originals** | Optionally preserves the source HEIC / MOV files |
 | **Quality control** | Adjustable from 1 (highest quality) to 8 (smallest size) |
 | **Live progress and logs** | Per-file results reported in real time |
+| **Clean up source files** | Optional. Moves `.livp` files to the Recycle Bin after a successful conversion, behind a confirmation prompt |
 | **Cancellable** | Stop a running job at any time |
 
 > **Folder structure**: by default your existing album folders (e.g. `2024 Yunnan trip/`)
@@ -103,6 +104,30 @@ lightbox (arrow keys to browse). It opens in your default browser and works offl
 Thumbnails are generated with ffmpeg and cached in a `.thumbs` folder, so regenerating the
 sheet for an updated batch only processes newly converted photos. For 893 photos the first
 run takes roughly 3 minutes and the resulting page is under 1 MB.
+
+## Cleaning up source files (use with care)
+
+When **Clean up source .livp** is enabled, source files are moved to the **Recycle Bin**
+after all conversions succeed. Enabling it shows a risk warning and requires confirmation.
+
+**Three things to keep in mind:**
+
+1. **The Recycle Bin does not free space.** Files stay on disk until you empty it yourself.
+2. **Emptying the Recycle Bin is irreversible.** The `.livp` is the only remaining source
+   for the original HEIC image and video.
+3. **JPG is lossy.** At higher quality settings you may regret the conversion later.
+
+**Built-in safeguards:**
+
+- Cleanup runs **only after every file converts successfully**
+- If you stop the job or **any** file fails, **not a single source file is deleted**
+- Each JPG (and MP4) is verified to exist and be non-empty before its source is deleted
+- If the Recycle Bin is full, source files are kept and the error is reported — never a
+  silent failure
+- This option is **not restored from the job record**; it must be re-confirmed each time
+- The checkbox resets after a run so it cannot affect the next batch
+
+To recover files, simply restore them from the Recycle Bin.
 
 ## Resuming an interrupted job
 
@@ -183,6 +208,7 @@ introduced, so the executable size is unaffected.
 | `livp_meta.py` | Capture-time resolution: EXIF → file name, with no unsafe guessing |
 | `livp_state.py` | Job state persistence backing resumable jobs (atomic writes, versioned so stale option defaults are not restored) |
 | `livp_contact.py` | Contact-sheet generation: thumbnail cache and HTML gallery |
+| `livp_cleanup.py` | Optional source-file cleanup via the Windows Recycle Bin (ctypes `SHFileOperationW`, no permanent delete) |
 | `make_test_livp.py` | Development helper that generates test `.livp` files; not part of the build |
 
 ## FAQ

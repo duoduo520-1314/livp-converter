@@ -25,11 +25,13 @@ try:
     import livp_meta
     import livp_state
     import livp_contact
+    import livp_cleanup
 except ImportError:      # 源码直接双击运行时也可能走到这里
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
     import livp_meta
     import livp_state
     import livp_contact
+    import livp_cleanup
 
 
 # ---------------------------------------------------------------- ffmpeg 发现
@@ -150,6 +152,8 @@ class Worker(threading.Thread):
         self.stop_flag = threading.Event()
         # 本次运行已占用的输出文件名，用于同一秒连拍时防覆盖
         self.used = set(used or ())
+        # (源文件, [产物...])，供清理阶段逐一校验后才允许删源
+        self.produced = []
 
     def stop(self):
         self.stop_flag.set()
@@ -271,6 +275,11 @@ class Worker(threading.Thread):
                     shutil.rmtree(work, ignore_errors=True)
 
                 ok += 1
+                # 登记产物供清理阶段校验：只有确认落盘才允许删源文件。
+                # 注意「已存在跳过」的分支走continue，不登记到 produced——
+                # 续传时被跳过的旧文件同样安全，不会因本轮开启清理而被误删。
+                self.produced.append((src, [jpg] + ([mp4] if vid and
+                                                    self.opts.get("mp4", True) else [])))
                 label = " + ".join(done)
                 if t is None:
                     label += "  [无拍摄时间，沿用原名]"
@@ -283,7 +292,27 @@ class Worker(threading.Thread):
                 fail += 1
                 self.q.put(("fail", idx, src, str(e)))
 
-        self.q.put(("finish", ok, fail, skip, self.stop_flag.is_set(), no_time))
+        stopped = self.stop_flag.is_set()
+        cleanup = (0, 0, [])
+        if self.opts.get("cleanup") and not stopped and fail == 0:
+            cleanup = self._cleanup_sources()
+        self.q.put(("finish", ok, fail, skip, stopped, no_time, cleanup))
+
+    def _cleanup_sources(self):
+        """两阶段清理：逐个校验产物落盘后，把源 .livp 送进回收站。
+
+        仅在无失败、未手动停止时调用。任一产物缺失则跳过该文件并保留源文件。
+        """
+        deletable = []
+        kept = []
+        for src, outs in self.produced:
+            if livp_cleanup.verify_outputs(outs[0], extra=outs[1:]):
+                deletable.append(src)
+            else:
+                kept.append(src)
+        if kept:
+            self.q.put(("cleanup_keep", kept))
+        return livp_cleanup.recycle(deletable)
 
     def _resolve_time(self, src):
         """外层（不解压）先估一次时间，避免为不需要时间的场景付出解压代价。"""
@@ -323,6 +352,7 @@ class App(tk.Tk):
         # 默认关闭：多数相册目录（如「2024云南2日游」）本身已是有意义的组织方式，
         # 默认按日期分层反而会把它们打散成上百个日期目录。
         self.var_by_date = tk.BooleanVar(value=False)
+        self.var_cleanup = tk.BooleanVar(value=False)
         self.var_quality = tk.IntVar(value=2)
         self.var_status = tk.StringVar(value="就绪")
         self.var_count = tk.StringVar(value="尚未添加文件")
@@ -394,6 +424,9 @@ class App(tk.Tk):
                  command=self._on_by_time_toggle).grid(row=1, column=1, sticky="w", pady=(8, 0))
         self._chk(opts, "按日期分文件夹（在相册目录下再分 2026-03-15/）", self.var_by_date).grid(
             row=2, column=0, sticky="w", padx=(0, 16), pady=(6, 0))
+        self._chk(opts, "转换后清理源 .livp（送入回收站）", self.var_cleanup,
+                 command=self._on_cleanup_toggle).grid(
+            row=2, column=1, sticky="w", pady=(6, 0))
 
         qf = tk.Frame(b3, bg=self.CARD)
         qf.grid(row=1, column=0, sticky="w", pady=(8, 0))
@@ -591,6 +624,9 @@ class App(tk.Tk):
                          ("by_time", self.var_by_time), ("by_date", self.var_by_date)):
             if key in o:
                 var.set(bool(o[key]))
+        # 清理源文件是破坏性选项，故意不随记录恢复：
+        # 重开程序时静默勾上等于替用户做了删文件的决定，必须每次重新确认。
+        self.var_cleanup.set(False)
         try:
             self.var_quality.set(int(o.get("quality", 2)))
         except Exception:
@@ -608,6 +644,7 @@ class App(tk.Tk):
             "skip_existing": self.var_skip.get(),
             "by_time": self.var_by_time.get(),
             "by_date": self.var_by_date.get(),
+            "cleanup": self.var_cleanup.get(),
         }
 
     def _persist(self):
@@ -628,6 +665,48 @@ class App(tk.Tk):
                           "opts": {}, "done": [], "updated": 0.0}
             self._hide_resume()
             self.write_log("已清除任务记录。")
+
+    def _on_cleanup_toggle(self):
+        """勾选「清理源文件」时明确告知风险，并要求二次确认。"""
+        if not self.var_cleanup.get():
+            return
+        if not self.files:
+            return
+
+        n = len(self.files)
+        size = livp_cleanup.total_size(p for p, _ in self.files)
+        self.write_log("已启用清理源文件：本次涉及 %d 个 .livp，共 %s。"
+                       % (n, livp_cleanup.fmt_size(size)))
+
+        if not messagebox.askyesno(
+                "清理源文件 — 请先了解风险",
+                "勾选后，转换完成的 .livp 源文件会被移入【回收站】。\n\n"
+                "涉及文件：%d 个\n占用空间：%s\n\n"
+                "请注意以下三点：\n\n"
+                "• 文件进入回收站后【依然占用磁盘空间】，并不会立刻释放。\n"
+                "  需要你手动清空回收站才会真正腾出空间。\n\n"
+                "• 一旦清空回收站，源文件【无法恢复】。\n"
+                "  .livp 是唯一能还原 HEIC 原图与原始视频的来源。\n\n"
+                "• 若 JPG 质量设置偏高（数字偏小），有损压缩可能让你\n"
+                "  日后悔不当初。\n\n"
+                "本工具的保护措施：\n"
+                "• 仅在全部文件转换成功后才清理\n"
+                "• 中途停止或失败的文件一律保留\n"
+                "• 逐个确认产物已落盘后才删除对应源文件\n\n"
+                "是否继续启用？" % (n, livp_cleanup.fmt_size(size))):
+            self.var_cleanup.set(False)
+            self.write_log("已取消启用清理源文件。")
+            return
+
+        if not messagebox.askokcancel(
+                "再次确认",
+                "最后确认：\n\n"
+                "转换完成后，%d 个源文件将进入回收站。\n\n"
+                "清空回收站后不可恢复。\n\n"
+                "点击「确定」继续，或「取消」关闭该选项。"
+                % n):
+            self.var_cleanup.set(False)
+            self.write_log("已取消启用清理源文件。")
 
     def _style(self):
         st = ttk.Style(self)
@@ -844,9 +923,18 @@ class App(tk.Tk):
                     _, idx, src, err = kind
                     self.bar.config(value=idx)
                     self.write_log("[%d] 失败 %s  →  %s" % (idx, os.path.basename(src), err))
+                elif kind[0] == "cleanup_keep":
+                    kept = kind[1]
+                    self.write_log("有 %d 个文件的产物未确认落盘，"
+                                   "其源文件已保留：" % len(kept))
+                    for s in kept[:5]:
+                        self.write_log("· " + os.path.basename(s))
+                    if len(kept) > 5:
+                        self.write_log("  …另有 %d 个" % (len(kept) - 5))
                 elif kind[0] == "finish":
                     _, ok, fail, skip, stopped = kind[:5]
                     no_time = kind[5] if len(kind) > 5 else 0
+                    cleanup = kind[6] if len(kind) > 6 else (0, 0, [])
                     self.write_log("-" * 58)
                     parts = ["成功 %d" % ok, "失败 %d" % fail]
                     if skip:
@@ -860,14 +948,37 @@ class App(tk.Tk):
                             "已保留原文件名。" % no_time)
                         self.write_log("  文件修改时间在传输/备份后往往失真，"
                                        "因此未用它生成文件名。")
+
+                    cok, cfail, cerrs = cleanup
+                    if self.var_cleanup.get() or cok or cfail:
+                        if stopped:
+                            self.write_log("已手动停止，源文件全部保留，未执行清理。")
+                        elif fail:
+                            self.write_log("存在 %d 个失败文件，本次不清理任何源文件。"
+                                           % fail)
+                        elif cok:
+                            self.write_log("已将 %d 个源 .livp 移入回收站。"
+                                           % cok)
+                            self.write_log("  回收站仍占用磁盘空间，"
+                                           "需要时请手动清空回收站；清空后不可恢复。")
+                        if cfail:
+                            self.write_log("⚠ %d 个源文件未能删除，已保留：" % cfail)
+                            for e in cerrs[:5]:
+                                self.write_log("  · " + e)
+                            if len(cerrs) > 5:
+                                self.write_log("  …另有 %d 条" % (len(cerrs) - 5))
+
                     self.var_status.set("已停止" if stopped else "全部完成")
                     self.btn_start.config(state="normal")
+                    self.var_cleanup.set(False)   # 清理只对本次生效
                     if (ok or skip) and not stopped:
                         msg = "成功 %d 个" % ok
                         if fail:
                             msg += "，失败 %d 个" % fail
                         if skip:
                             msg += "，跳过 %d 个（已存在）" % skip
+                        if cok:
+                            msg += "\n\n另有 %d 个源文件已移入回收站（需手动清空回收站才会释放空间）" % cok
                         messagebox.showinfo("转换完成", msg + "。\n\n输出位置：%s"
                                             % self.var_out.get())
         except queue.Empty:
