@@ -28,18 +28,7 @@ venv/
 Thumbs.db
 # 打包日志
 _build.log
-_verify_exe.py
-_verify_estimate.py
-_verify_logfilter.py
-_verify_sheet.py
-_audit_bugs.py
-_audit_impact.py
-_verify_fixes.py
-_regress_v1.py
-_diag.py
-_diag2.py
-_fixindent.py
-_shot.py
-_shot_v1.png
-_shot_v2.png
-_test_ui_v2.py
+# 以 _ 开头的本地验证/诊断脚本、截图与素材，不进仓库
+/_*.py
+/_*.png
+/_exerun/

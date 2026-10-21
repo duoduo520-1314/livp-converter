@@ -129,25 +129,38 @@ class App(_AppV1):
         self._check_env()
         self._offer_resume()
 
+    # 窗口外框（标题栏 + 边框）比客户区高的部分。
+    # 实测 990 客户区 -> GetWindowRect 1029，即 39 px。
+    # 不算这一截，窗口底部就会被屏幕裁掉。
+    _FRAME_EXTRA = 40
+    # 任务栏等系统占用
+    _TASKBAR = 45
+
     def _autofit(self):
-        """按内容实际需要的高度开窗，并以屏幕可用高度为上限。
+        """按内容实际需要的高度开窗，并保证整个窗口完整落在屏幕内。
 
         布局里有随相册数量变化的区域（相册清单）与可折叠区，
         固定高度必然出现两种坏结果之一：窗口留一大片空白，
         或者内容被裁掉 —— 日志区实测只剩 2px 高，等于没有。
-        这里让 tk 自己算 reqheight，再夹到屏幕范围内。
+
+        第一版只按屏幕高限制了【客户区】高度，结果窗口底部被裁掉
+        183px：外框比客户区还高 39px，而窗口又被居中放到 y=234。
+        限制必须算上「外框 + 窗口位置」，而且位置要自己定，
+        不能交给 tk 居中。
         """
         self.update_idletasks()
         need = self.winfo_reqheight()
         sw = self.winfo_screenwidth()
         sh = self.winfo_screenheight()
-        # 留出任务栏与标题栏的余量
-        max_h = sh - 90
-        h = max(640, min(need + 24, max_h))
+
+        y = self._TASKBAR
+        # 从 y 出发还能用的客户区高度
+        avail = sh - self._TASKBAR - self._FRAME_EXTRA - y
+        h = max(560, min(need + 24, avail))
         w = max(940, min(self.winfo_reqwidth() + 60, sw - 60))
-        self.geometry("%dx%d" % (w, h))
-        # 日志区给一个最小可视高度：窗口很矮时它不能被压没
-        self.minsize(900, min(640, max_h))
+        x = max(0, (sw - w) // 2)
+        self.geometry("%dx%d+%d+%d" % (w, h, x, y))
+        self.minsize(900, min(560, avail))
 
     # ---------- 卡片 ----------
     def _card(self, title, sub=None, right=None, pady=(10, 0), expand=False):
@@ -381,6 +394,8 @@ class App(_AppV1):
         est = tk.Label(self, textvariable=self.var_est, bg=self.BG, fg=self.MUTED,
                        font=("Microsoft YaHei UI", 8), anchor="w")
         est.pack(fill="x", padx=pad + 2, pady=(6, 0))
+        # 联系表行要靠它钉回原位，见 _show_sheet_row
+        self._est_label = est
 
         # ===== 进度与日志 =====
         # 日志卡要吃掉窗口剩余高度：expand 让它随窗口拉伸，
@@ -611,7 +626,12 @@ class App(_AppV1):
     # 这里必须跟着换，否则 V1 的 grid() 在 V2 里是静默空操作 ——
     # 表现为「点了生成联系表，进度条那一行根本不出现」。
     def _show_sheet_row(self):
-        self._sheet_row.pack(fill="x", padx=16, pady=(10, 0))
+        # 必须带 before=：pack_forget 会丢掉原来的 pack 位置，再 pack 就被排到
+        # 末尾，落到 expand=True 的日志卡下面。日志卡吃掉了窗口剩余高度，
+        # 这一行会被挤出可视区、压成 0 高度 —— 实跑时点了「生成联系表」
+        # 却完全看不到进度条（HTML 照样生成，界面毫无反馈），就是这个坑。
+        self._sheet_row.pack(fill="x", padx=16, pady=(10, 0),
+                             before=self._est_label)
 
     def _hide_sheet_row(self):
         self._sheet_row.pack_forget()
